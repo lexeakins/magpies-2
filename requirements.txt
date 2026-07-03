@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+openpyxl
+httpx
+anthropic
+rapidfuzz
+sse-starlette
+python-dotenv
+sqlalchemy
+pyodbc>=5.0.0
+simple-salesforce>=1.12.0

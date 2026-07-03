@@ -1,0 +1,1791 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Magpie — Experiment Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: {
+      brand:   { 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8' },
+      surface: { 900:'#0f172a', 800:'#1e293b', 700:'#334155', 600:'#475569' }
+    }}}}
+  </script>
+  <style>
+    [x-cloak]{display:none!important}
+    .log-enter{animation:slideIn .18s ease-out}
+    @keyframes slideIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    .bar{transition:width .4s ease-in-out}
+    ::-webkit-scrollbar{width:6px}
+    ::-webkit-scrollbar-track{background:#1e293b}
+    ::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
+    .provider-anthropic{color:#f59e0b}
+    .provider-perplexity{color:#8b5cf6}
+  </style>
+</head>
+
+<body class="h-full bg-surface-900 text-slate-100 font-sans" x-data="app()" x-init="init()">
+<div class="flex h-full min-h-screen">
+
+<!-- ══ SIDEBAR ══ -->
+<aside class="w-56 bg-surface-800 border-r border-surface-700 flex flex-col flex-shrink-0">
+  <div class="px-5 py-5 border-b border-surface-700">
+    <div class="flex items-center gap-2 mb-1">
+      <svg class="w-6 h-6 text-brand-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/>
+      </svg>
+      <span class="font-bold text-white">Magpie</span>
+    </div>
+    <p class="text-xs text-slate-500">Experiment Engine v1</p>
+  </div>
+
+  <nav class="flex-1 px-3 py-4 space-y-1">
+    <template x-for="n in nav" :key="n.id">
+      <button @click="page=n.id"
+        :class="page===n.id?'bg-brand-600 text-white':'text-slate-400 hover:bg-surface-700 hover:text-white'"
+        class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition"
+        x-text="n.label"></button>
+    </template>
+  </nav>
+
+  <div class="px-4 py-4 border-t border-surface-700 space-y-3">
+    <div>
+      <p class="text-xs text-slate-500 mb-0.5">Haiku spend</p>
+      <p class="text-sm font-mono text-amber-400" x-text="'$'+totalHaikuSpend.toFixed(5)"></p>
+    </div>
+    <div>
+      <p class="text-xs text-slate-500 mb-0.5">Perplexity spend</p>
+      <p class="text-sm font-mono text-violet-400" x-text="'$'+totalPerplexitySpend.toFixed(5)"></p>
+    </div>
+    <button @click="shutdownServer()"
+      class="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium
+             text-red-400 border border-red-500/30 hover:bg-red-500/10 transition">
+      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 11-12.728 0M12 3v9"/>
+      </svg>
+      Shut Down
+    </button>
+  </div>
+</aside>
+
+<!-- ══ MAIN ══ -->
+<main class="flex-1 flex flex-col overflow-hidden">
+
+<!-- ════ NEW EXPERIMENT ════ -->
+<div x-show="page==='new'" x-cloak class="flex-1 flex flex-col overflow-auto">
+
+  <!-- Upload -->
+  <template x-if="step==='upload'">
+    <div class="flex-1 flex items-center justify-center p-8">
+      <div class="w-full max-w-xl">
+        <h1 class="text-2xl font-bold text-white mb-1">New Experiment</h1>
+        <p class="text-slate-400 text-sm mb-6">Upload your Excel file. Multi-sheet files are combined automatically.</p>
+        <div class="border-2 border-dashed border-surface-600 rounded-xl p-10 text-center cursor-pointer
+                    hover:border-brand-500 hover:bg-surface-800 transition"
+             @click="$refs.fi.click()" @dragover.prevent @drop.prevent="handleDrop($event)">
+          <svg class="w-10 h-10 text-slate-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+          </svg>
+          <p class="text-slate-300 font-medium">Drop Excel file here</p>
+          <p class="text-slate-500 text-xs mt-1">.xlsx only</p>
+        </div>
+        <input type="file" accept=".xlsx,.csv" x-ref="fi" class="hidden" @change="handleFileSelect($event)"/>
+        <p x-show="uploadError" class="mt-3 text-red-400 text-sm" x-text="uploadError"></p>
+        <p x-show="uploading" class="mt-3 text-slate-400 text-sm animate-pulse">Uploading…</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- Cleanse report + experiment config -->
+  <template x-if="step==='config'">
+    <div class="flex-1 overflow-auto p-8">
+      <div class="max-w-2xl space-y-5">
+        <button @click="step='upload'; fileId=null" class="text-slate-400 hover:text-white text-sm flex items-center gap-1 transition">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          Re-upload
+        </button>
+
+        <!-- Cleanse summary -->
+        <div class="bg-surface-800 rounded-xl border border-surface-700 p-5">
+          <div class="flex items-center gap-3 mb-4">
+            <div class="w-7 h-7 rounded-full bg-green-500/20 flex items-center justify-center">
+              <svg class="w-4 h-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <p class="font-semibold text-white">File ready</p>
+              <p class="text-xs text-slate-400" x-text="ingestReport.file_name"></p>
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-3 text-center mb-3">
+            <div><p class="text-xl font-bold text-white" x-text="ingestReport.sheets_found?.length??'—'"></p><p class="text-xs text-slate-500">Sheets</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="(ingestReport.total_valid??0).toLocaleString()"></p><p class="text-xs text-slate-500">Valid rows</p></div>
+            <div><p class="text-xl font-bold" :class="(ingestReport.dropped??0)>0?'text-amber-400':'text-slate-500'" x-text="(ingestReport.dropped??0).toLocaleString()"></p><p class="text-xs text-slate-500">Dropped</p></div>
+          </div>
+          <template x-if="Object.keys(ingestReport.drop_reasons??{}).length>0">
+            <details class="text-xs">
+              <summary class="text-slate-400 cursor-pointer hover:text-slate-200">Drop reasons</summary>
+              <div class="mt-2 space-y-2">
+                <template x-for="[r,c] in Object.entries(ingestReport.drop_reasons??{})">
+                  <details class="rounded-md bg-surface-900/60 border border-surface-700 px-2 py-1">
+                    <summary class="cursor-pointer text-slate-400 hover:text-slate-200">
+                      <span class="font-mono" x-text="r"></span>
+                      <span class="float-right text-amber-400" x-text="c.toLocaleString()+' rows'"></span>
+                    </summary>
+                    <div class="mt-2 space-y-1">
+                      <template x-for="sample in dropSamples(r)">
+                        <div class="grid grid-cols-[auto_auto_1fr] gap-2 text-slate-500 border-t border-surface-700/60 pt-1">
+                          <span class="font-mono text-slate-400" x-text="sample.sheet"></span>
+                          <span class="font-mono text-slate-500" x-text="'row '+sample.row"></span>
+                          <span class="truncate" :title="sample.data" x-text="sample.data || '(blank row)'"></span>
+                        </div>
+                      </template>
+                      <p x-show="dropSamples(r).length===0" class="text-slate-600">No sample rows captured.</p>
+                    </div>
+                  </details>
+                </template>
+              </div>
+            </details>
+          </template>
+        </div>
+
+        <!-- Experiment metadata -->
+        <div class="bg-surface-800 rounded-xl border border-surface-700 p-5">
+          <p class="text-sm font-semibold text-slate-300 mb-4">Experiment</p>
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Name <span class="text-slate-600">(describe what you're testing)</span></label>
+              <input type="text" x-model="experiment.name" placeholder="e.g. Test 3: Haiku + Perplexity on TX subset"
+                class="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white
+                       focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder-slate-600"/>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400 block mb-1">Hypothesis / Notes</label>
+              <textarea x-model="experiment.notes" rows="2" placeholder="What do you expect to learn from this run?"
+                class="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white
+                       focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder-slate-600 resize-none"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pipeline configuration -->
+        <div class="bg-surface-800 rounded-xl border border-surface-700 p-5">
+          <p class="text-sm font-semibold text-slate-300 mb-4">Pipeline</p>
+          <div class="space-y-3">
+
+            <!-- GMAPS — always on -->
+            <div class="border border-surface-600 rounded-lg px-4 py-3 flex items-center gap-3">
+              <span class="text-xs font-semibold px-2 py-0.5 rounded bg-surface-600 text-slate-300">GMAPS</span>
+              <span class="text-xs text-slate-500">Google Maps scraper — always runs</span>
+            </div>
+
+            <!-- KNOWN URLS -->
+            <div class="border border-surface-600 rounded-lg p-4">
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="manual_associations_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-xs font-semibold px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">KNOWN URLS</span>
+                    <span class="text-xs text-slate-500">Use manually verified website associations</span>
+                  </div>
+                  <p class="text-xs text-slate-500">Matches by company, city, state, and country before Salesforce or legacy DB evidence.</p>
+                </div>
+              </label>
+            </div>
+
+            <!-- ANTHROPIC / HAIKU -->
+            <div class="border border-surface-600 rounded-lg p-4 space-y-3">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">ANTHROPIC / HAIKU</span>
+                <span class="text-xs text-slate-500">Validate website content from page text</span>
+              </div>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="haiku_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Haiku initial validation</p>
+                  <p class="text-xs text-slate-500">Validates Maps URL by reading the page. Passes to Perplexity if confidence is low.</p>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="haiku_validation_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Haiku post-Perplexity validation</p>
+                  <p class="text-xs text-slate-500">Independent Haiku pass on Perplexity's returned URL to confirm it.</p>
+                </div>
+              </label>
+            </div>
+
+            <!-- PERPLEXITY -->
+            <div class="border border-surface-600 rounded-lg p-4 space-y-3">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">PERPLEXITY</span>
+                <span class="text-xs text-slate-500">Search-augmented URL finding + verification</span>
+              </div>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="perplexity_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Perplexity search</p>
+                  <p class="text-xs text-slate-500">Finds or verifies website URLs using live web search. Uses street address + zip for precision.</p>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="perplexity_validate"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Verify existing URLs</p>
+                  <p class="text-xs text-slate-500">When Maps returns a URL that Haiku doubts, ask Perplexity to confirm or correct it.</p>
+                </div>
+              </label>
+              <div x-show="perplexity_enabled" class="ml-6">
+                <label class="text-xs text-slate-400 block mb-1">When to run Perplexity</label>
+                <select x-model="perplexity_trigger"
+                  class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white
+                         focus:outline-none focus:ring-2 focus:ring-brand-500">
+                  <option value="no_url_or_low_confidence">No URL from Maps, or Haiku says low confidence</option>
+                  <option value="no_url_only">Only when Maps has no URL</option>
+                  <option value="always">Every record</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- HISTORICAL SOURCES -->
+            <div class="border border-surface-600 rounded-lg p-4 space-y-3">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">HISTORICAL</span>
+                <span class="text-xs text-slate-500">Read-only website candidates from records we already have</span>
+              </div>
+              <label class="flex items-start gap-3 cursor-pointer"
+                     :class="settingsForm.salesforce_enrichment_configured?'':'opacity-60'">
+                <input type="checkbox" x-model="salesforce_enrichment_enabled"
+                       :disabled="!settingsForm.salesforce_enrichment_configured"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Salesforce enrichment</p>
+                  <p class="text-xs text-slate-500">Search Account, Lead, and Contact Account websites by name, city, and state. Read-only.</p>
+                  <p x-show="!settingsForm.salesforce_enrichment_configured" class="text-xs text-amber-400 mt-1">Requires Salesforce credentials in .env.</p>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer"
+                     :class="settingsForm.legacy_enrichment_configured?'':'opacity-60'">
+                <input type="checkbox" x-model="legacy_enrichment_enabled"
+                       :disabled="!settingsForm.legacy_enrichment_configured"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Legacy DB enrichment</p>
+                  <p class="text-xs text-slate-500">Checks CustomerDB contact email domains as stale historical evidence, then scores deterministically.</p>
+                  <p x-show="!settingsForm.legacy_enrichment_configured" class="text-xs text-amber-400 mt-1">Requires DB_HOST and DB_NAME in .env.</p>
+                </div>
+              </label>
+            </div>
+
+            <!-- WEB FALLBACK -->
+            <div class="border border-surface-600 rounded-lg p-4 space-y-3">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">BING MAPS</span>
+                <span class="text-xs text-slate-500">Coordinate-biased map fallback after unresolved Google Maps</span>
+              </div>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="bing_maps_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Run Bing Maps after unresolved Google Maps</p>
+                  <p class="text-xs text-slate-500">Collects map listing name, website, address, phone, and Bing Maps URL, then applies the deterministic scorer.</p>
+                </div>
+              </label>
+
+              <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">WEB FALLBACK</span>
+                <span class="text-xs text-slate-500">Best-effort search result candidates after Maps fails</span>
+              </div>
+              <label class="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" x-model="web_search_fallback_enabled"
+                       class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                <div>
+                  <p class="text-sm text-slate-200">Run web search after unresolved Maps</p>
+                  <p class="text-xs text-slate-500">Uses browser-style search result pages; cheaper but less stable than official APIs.</p>
+                </div>
+              </label>
+              <div x-show="web_search_fallback_enabled" class="ml-6 space-y-2">
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" x-model="bing_web_enabled"
+                         class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                  <div>
+                    <p class="text-sm text-slate-200">Bing result page</p>
+                    <p class="text-xs text-slate-500">Collects organic URL/title/snippet candidates from the first page.</p>
+                  </div>
+                </label>
+                <label class="flex items-start gap-3 cursor-pointer">
+                  <input type="checkbox" x-model="duckduckgo_web_enabled"
+                         class="mt-0.5 rounded border-slate-600 bg-surface-700 text-brand-500"/>
+                  <div>
+                    <p class="text-sm text-slate-200">DuckDuckGo HTML result page</p>
+                    <p class="text-xs text-slate-500">Experimental fallback for rows still missing a final URL.</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Row limit + run -->
+        <div class="bg-surface-800 rounded-xl border border-surface-700 p-5">
+          <p class="text-sm font-semibold text-slate-300 mb-3">Run options</p>
+          <div class="flex items-center gap-3 mb-2">
+            <input type="checkbox" id="lim" x-model="useLimit" class="rounded border-slate-600 bg-surface-700 text-brand-500"/>
+            <label for="lim" class="text-sm text-slate-300">Limit to first</label>
+            <input type="number" x-model="rowLimit" min="1" :disabled="!useLimit"
+              class="w-24 bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white
+                     disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            <span class="text-sm text-slate-400">rows</span>
+          </div>
+          <p class="text-xs text-slate-500">
+            Est. cost:
+            <span x-show="haiku_enabled" class="text-amber-400">Haiku ~$<span x-text="estimatedCost('haiku')"></span></span>
+            <span x-show="perplexity_enabled" class="text-violet-400 ml-1">Perplexity ~$<span x-text="estimatedCost('perplexity')"></span></span>
+          </p>
+        </div>
+
+        <button @click="startJob()"
+          class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl transition
+                 flex items-center justify-center gap-2">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.131a1 1 0 000-1.664z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Run Experiment
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Running -->
+  <template x-if="step==='running'">
+    <div class="flex-1 flex flex-col p-8 gap-5 overflow-auto">
+
+      <!-- Header card -->
+      <div class="bg-surface-800 rounded-xl border border-surface-700 p-6">
+        <div class="flex items-start justify-between mb-1">
+          <div>
+            <p class="text-xs text-slate-500 uppercase tracking-wider mb-0.5">Experiment</p>
+            <h2 class="text-lg font-bold text-white" x-text="experiment.name || 'Untitled experiment'"></h2>
+            <p class="text-slate-500 text-xs mt-0.5" x-text="experiment.notes"></p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="px-2 py-1 rounded text-xs font-semibold font-mono text-brand-500 bg-brand-500/10" x-text="jobId"></span>
+            <span x-show="jobErrored" class="px-2 py-1 rounded-full text-xs font-semibold bg-red-500/20 text-red-400">Error</span>
+            <span x-show="!jobErrored" class="px-2 py-1 rounded-full text-xs font-semibold"
+                  :class="jobDone?'bg-green-500/20 text-green-400':'bg-blue-500/20 text-blue-400 animate-pulse'"
+                  x-text="jobCancelled&&!jobDone?'Cancelling…':jobDone?'Complete':'Running'"></span>
+          </div>
+        </div>
+
+        <!-- Stages used -->
+        <div class="flex gap-2 mt-3 mb-4">
+          <span class="text-xs px-2 py-0.5 rounded bg-surface-700 text-slate-400">GMAPS</span>
+          <span x-show="manual_associations_enabled" class="text-xs px-2 py-0.5 rounded bg-green-500/10 text-green-400">KNOWN URLS</span>
+          <span x-show="haiku_enabled" class="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-400">HAIKU</span>
+          <span x-show="perplexity_enabled" class="text-xs px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">PERPLEXITY</span>
+          <span x-show="haiku_validation_enabled && perplexity_enabled" class="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-400">HAIKU VAL</span>
+          <span x-show="salesforce_enrichment_enabled" class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400">SALESFORCE</span>
+          <span x-show="legacy_enrichment_enabled" class="text-xs px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400">LEGACY DB</span>
+          <span x-show="bing_maps_enabled" class="text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-400">BING MAPS</span>
+          <span x-show="web_search_fallback_enabled" class="text-xs px-2 py-0.5 rounded bg-sky-500/10 text-sky-400">WEB FALLBACK</span>
+        </div>
+
+        <div class="w-full bg-surface-700 rounded-full h-1.5 mb-4">
+          <div class="bg-brand-500 h-1.5 rounded-full bar" :style="'width:'+pct+'%'"></div>
+        </div>
+
+        <div class="grid grid-cols-6 gap-3 text-center">
+          <div><p class="text-lg font-bold text-white" x-text="(prog.completed??0).toLocaleString()"></p><p class="text-xs text-slate-500">Done</p></div>
+          <div><p class="text-lg font-bold text-green-400" x-text="(prog.found??0).toLocaleString()"></p><p class="text-xs text-slate-500">Websites</p></div>
+          <div><p class="text-lg font-bold text-red-400" x-text="(prog.errors??0).toLocaleString()"></p><p class="text-xs text-slate-500">Errors</p></div>
+          <div><p class="text-lg font-bold text-amber-400 font-mono" x-text="'$'+(prog.haiku_cost_usd??0).toFixed(4)"></p><p class="text-xs text-slate-500">Haiku $</p></div>
+          <div><p class="text-lg font-bold text-violet-400 font-mono" x-text="'$'+(prog.perplexity_cost_usd??0).toFixed(4)"></p><p class="text-xs text-slate-500">Perplexity $</p></div>
+          <div><p class="text-lg font-bold text-white font-mono" x-text="'$'+(prog.total_cost_usd??0).toFixed(4)"></p><p class="text-xs text-slate-500">Total $</p></div>
+        </div>
+
+        <div x-show="(prog.worker_errors??0)>0 || activeRows.length" class="mt-4 pt-4 border-t border-surface-700">
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-sm font-semibold text-slate-300">Active stages</p>
+            <p class="text-xs" :class="(prog.worker_errors??0)>0?'text-red-400':'text-slate-500'">
+              Worker errors: <span x-text="(prog.worker_errors??0).toLocaleString()"></span>
+            </p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-slate-500 uppercase border-b border-surface-700">
+                  <th class="py-1 text-left">Company</th>
+                  <th class="py-1 text-left">Stage</th>
+                  <th class="py-1 text-left">Event</th>
+                  <th class="py-1 text-left">Worker</th>
+                  <th class="py-1 text-right">Elapsed</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in activeRows.slice(0,8)" :key="row.row_key">
+                  <tr class="border-b border-surface-700/60">
+                    <td class="py-1 pr-3 text-slate-200 truncate max-w-[260px]" x-text="row.company||'--'"></td>
+                    <td class="py-1 pr-3 text-brand-400 font-mono" x-text="row.stage||'--'"></td>
+                    <td class="py-1 pr-3 text-slate-400 font-mono" x-text="row.event_type||'--'"></td>
+                    <td class="py-1 pr-3 text-slate-500 font-mono" x-text="row.worker||'--'"></td>
+                    <td class="py-1 text-right text-slate-400 font-mono" x-text="formatElapsed(row.elapsed_ms)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div x-show="jobErrored" class="mt-4 pt-4 border-t border-surface-700">
+          <p class="text-sm font-semibold text-red-400">Job failed during completion.</p>
+          <p class="text-xs text-slate-500 mt-1" x-text="errors[errors.length-1] || 'Check History for the saved diagnostic details.'"></p>
+        </div>
+
+        <div x-show="!jobDone && !jobCancelled && !jobErrored" class="mt-4 pt-4 border-t border-surface-700 flex justify-end">
+          <button @click="cancelJob()"
+            class="flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm text-red-400 border border-red-500/30 hover:bg-red-500/10 transition">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            Stop Job
+          </button>
+        </div>
+      </div>
+
+      <!-- Rolling log -->
+      <div class="bg-surface-800 rounded-xl border border-surface-700 flex flex-col" style="max-height:300px">
+        <div class="px-5 py-2.5 border-b border-surface-700 flex justify-between items-center flex-shrink-0">
+          <p class="text-sm font-semibold text-slate-300">Recent Activity</p>
+          <p class="text-xs text-slate-500">Last 10</p>
+        </div>
+        <div class="overflow-y-auto flex-1 text-xs">
+          <table class="w-full">
+            <thead class="sticky top-0 bg-surface-900">
+              <tr class="text-slate-500 uppercase">
+                <th class="px-4 py-2 text-left">Company</th>
+                <th class="px-3 py-2 text-left">Stages</th>
+                <th class="px-3 py-2 text-left">Final URL</th>
+                <th class="px-3 py-2 text-center">Score</th>
+                <th class="px-3 py-2 text-center">Tier</th>
+                <th class="px-3 py-2 text-right">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(r,i) in recentLogs" :key="i">
+                <tr class="border-t border-surface-700 log-enter hover:bg-surface-700/40">
+                  <td class="px-4 py-2 text-slate-200 truncate max-w-[140px]" x-text="r.company"></td>
+                  <td class="px-3 py-2 text-slate-500 font-mono" x-text="r.stages_run"></td>
+                  <td class="px-3 py-2 max-w-[160px]">
+                    <a x-show="r.final_url" :href="r.final_url" target="_blank"
+                       class="text-brand-500 hover:underline truncate block"
+                       x-text="(r.final_url||'').replace(/^https?:\/\//,'').slice(0,30)"></a>
+                    <span x-show="!r.final_url" class="text-slate-600">—</span>
+                  </td>
+                  <td class="px-3 py-2 text-center font-mono font-semibold"
+                      :class="scoreColor(r.final_score)" x-text="r.final_score??'—'"></td>
+                  <td class="px-3 py-2 text-center">
+                    <span x-show="r.tier" class="px-1.5 py-0.5 rounded text-xs font-semibold"
+                          :class="tierBadge(r.tier)" x-text="r.tier"></span>
+                  </td>
+                  <td class="px-3 py-2 text-right font-mono text-slate-400"
+                      x-text="r.cost_usd?'$'+Number(r.cost_usd).toFixed(5):''"></td>
+                </tr>
+              </template>
+              <tr x-show="!recentLogs.length"><td colspan="6" class="px-4 py-6 text-center text-slate-600">Waiting for first results…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Done state -->
+      <template x-if="jobDone && jobReport">
+        <div class="space-y-3">
+          <div class="grid grid-cols-4 gap-3">
+            <div class="bg-green-950/40 border border-green-500/30 rounded-xl p-4 text-center">
+              <p class="text-2xl font-bold text-green-400" x-text="jobReport.confidence?.high?.count??0"></p>
+              <p class="text-xs text-green-400/70 mt-1">High (<span x-text="jobReport.confidence?.high?.pct??0"></span>%)</p>
+            </div>
+            <div class="bg-amber-950/40 border border-amber-500/30 rounded-xl p-4 text-center">
+              <p class="text-2xl font-bold text-amber-400" x-text="jobReport.confidence?.medium?.count??0"></p>
+              <p class="text-xs text-amber-400/70 mt-1">Medium (<span x-text="jobReport.confidence?.medium?.pct??0"></span>%)</p>
+            </div>
+            <div class="bg-red-950/40 border border-red-500/30 rounded-xl p-4 text-center">
+              <p class="text-2xl font-bold text-red-400" x-text="(jobReport.confidence?.low?.count??0)+(jobReport.confidence?.unresolved?.count??0)"></p>
+              <p class="text-xs text-red-400/70 mt-1">Low + Unresolved</p>
+            </div>
+            <div class="bg-surface-800 border border-surface-700 rounded-xl p-4 text-center">
+              <p class="text-2xl font-bold text-white font-mono" x-text="'$'+(jobReport.cost?.total_usd??0).toFixed(5)"></p>
+              <p class="text-xs text-slate-500 mt-1">Total cost</p>
+            </div>
+          </div>
+
+          <!-- URL source breakdown -->
+          <div class="bg-surface-800 border border-surface-700 rounded-xl p-4 grid grid-cols-4 md:grid-cols-9 gap-4 text-center text-sm">
+            <div><p class="text-white font-semibold" x-text="jobReport.url_sources?.from_gmaps??0"></p><p class="text-xs text-slate-500">URLs from Maps</p></div>
+            <div><p class="text-violet-400 font-semibold" x-text="jobReport.url_sources?.from_perplexity??0"></p><p class="text-xs text-slate-500">URLs from Perplexity</p></div>
+            <div><p class="text-green-400 font-semibold" x-text="jobReport.url_sources?.from_manual??0"></p><p class="text-xs text-slate-500">URLs from Known</p></div>
+            <div><p class="text-emerald-400 font-semibold" x-text="jobReport.url_sources?.from_salesforce??0"></p><p class="text-xs text-slate-500">URLs from Salesforce</p></div>
+            <div><p class="text-cyan-400 font-semibold" x-text="jobReport.url_sources?.from_legacy??0"></p><p class="text-xs text-slate-500">URLs from Legacy DB</p></div>
+            <div><p class="text-blue-400 font-semibold" x-text="jobReport.url_sources?.from_bing_maps??0"></p><p class="text-xs text-slate-500">URLs from Bing Maps</p></div>
+            <div><p class="text-sky-400 font-semibold" x-text="jobReport.url_sources?.from_web_bing??0"></p><p class="text-xs text-slate-500">URLs from Bing</p></div>
+            <div><p class="text-sky-300 font-semibold" x-text="jobReport.url_sources?.from_web_duckduckgo??0"></p><p class="text-xs text-slate-500">URLs from DDG</p></div>
+            <div><p class="text-amber-400 font-semibold" x-text="jobReport.url_sources?.url_changed??0"></p><p class="text-xs text-slate-500">URLs corrected</p></div>
+          </div>
+
+          <div class="bg-surface-800 border border-surface-700 rounded-xl p-4 grid grid-cols-3 md:grid-cols-7 gap-4 text-center text-sm">
+            <div><p class="text-white font-semibold" x-text="jobReport.search_candidates?.evaluated??0"></p><p class="text-xs text-slate-500">Candidates</p></div>
+            <div><p class="text-white font-semibold" x-text="jobReport.search_candidates?.gmaps_attempts??0"></p><p class="text-xs text-slate-500">Maps attempts</p></div>
+            <div><p class="text-green-400 font-semibold" x-text="jobReport.search_candidates?.gmaps_retry_recovered??0"></p><p class="text-xs text-slate-500">Maps retry wins</p></div>
+            <div><p class="text-blue-400 font-semibold" x-text="jobReport.search_candidates?.bing_maps_recovered??0"></p><p class="text-xs text-slate-500">Bing Maps wins</p></div>
+            <div><p class="text-sky-400 font-semibold" x-text="jobReport.search_candidates?.web_search_recovered??0"></p><p class="text-xs text-slate-500">Web wins</p></div>
+            <div><p class="text-red-400 font-semibold" x-text="jobReport.search_candidates?.rejected??0"></p><p class="text-xs text-slate-500">Rejected</p></div>
+            <div><p class="text-slate-300 font-semibold" x-text="jobReport.search_candidates?.web_candidates??0"></p><p class="text-xs text-slate-500">Web candidates</p></div>
+          </div>
+
+          <div class="flex gap-3">
+            <a :href="'/api/job/'+jobId+'/download'"
+               class="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold px-5 py-3 rounded-xl
+                      flex items-center justify-center gap-2 text-sm transition">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              </svg>
+              Download Results
+            </a>
+            <button @click="openApiCalls(jobId)" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-5 py-3 rounded-xl text-sm transition">
+              View API Calls
+            </button>
+            <button @click="openSearchCandidates(jobId)" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-5 py-3 rounded-xl text-sm transition">
+              View Candidates
+            </button>
+            <button @click="resetForNew()" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-5 py-3 rounded-xl text-sm transition">
+              New Experiment
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+</div><!-- /new -->
+
+<!-- ════ HISTORY ════ -->
+<div x-show="page==='history'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-4xl">
+    <div class="flex items-center justify-between mb-6">
+      <h2 class="text-xl font-bold text-white">Experiment History</h2>
+      <button @click="loadHistory()" class="text-slate-400 hover:text-white text-sm transition">↻ Refresh</button>
+    </div>
+
+    <div x-show="!historyJobs.length" class="text-slate-500 text-sm">No experiments yet.</div>
+
+    <div x-show="historyJobs.length" class="bg-surface-800 border border-surface-700 rounded-xl p-5 mb-5">
+      <div class="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <h3 class="text-sm font-semibold text-white">Score and Match Rate</h3>
+          <p class="text-xs text-slate-500 mt-1">Completed jobs over time. Match rate is rows with a final URL divided by processed rows.</p>
+        </div>
+        <div class="flex gap-4 text-right text-xs">
+          <div>
+            <p class="text-slate-500">Latest score</p>
+            <p class="text-lg font-bold text-cyan-400" x-text="latestHistoryMetric()?.scoreLabel ?? '—'"></p>
+          </div>
+          <div>
+            <p class="text-slate-500">Latest match</p>
+            <p class="text-lg font-bold text-green-400" x-text="latestHistoryMetric()?.matchLabel ?? '—'"></p>
+            <p class="text-slate-500" x-text="latestHistoryMetric()?.matchCountLabel ?? ''"></p>
+          </div>
+        </div>
+      </div>
+
+      <div x-show="historyChartJobs().length < 2" class="h-44 flex items-center justify-center text-sm text-slate-500 border border-surface-700 rounded-lg">
+        Run at least two completed jobs to show a trend.
+      </div>
+
+      <div x-show="historyChartJobs().length >= 2" class="relative">
+        <svg viewBox="0 0 720 220" class="w-full h-56 overflow-visible" role="img" aria-label="Average score and match rate over job history">
+          <line x1="44" y1="20" x2="44" y2="178" stroke="#334155" stroke-width="1"/>
+          <line x1="44" y1="178" x2="700" y2="178" stroke="#334155" stroke-width="1"/>
+          <template x-for="tick in [0,25,50,75,100]" :key="tick">
+            <g>
+              <line x1="44" :y1="historyChartY(tick)" x2="700" :y2="historyChartY(tick)" stroke="#1e293b" stroke-width="1"/>
+              <text x="30" :y="historyChartY(tick)+4" text-anchor="end" fill="#64748b" font-size="11" x-text="tick"></text>
+            </g>
+          </template>
+          <path :d="historyChartPath('score')" fill="none" stroke="#22d3ee" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <path :d="historyChartPath('match')" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <template x-for="point in historyChartPoints('score')" :key="'score-'+point.id">
+            <circle :cx="point.x" :cy="point.y" r="4" fill="#22d3ee">
+              <title x-text="point.label"></title>
+            </circle>
+          </template>
+          <template x-for="point in historyChartPoints('match')" :key="'match-'+point.id">
+            <circle :cx="point.x" :cy="point.y" r="4" fill="#4ade80">
+              <title x-text="point.label"></title>
+            </circle>
+          </template>
+        </svg>
+        <div class="flex items-center justify-between text-xs text-slate-500 mt-1">
+          <span x-text="historyChartDateLabel(historyChartJobs()[0])"></span>
+          <div class="flex items-center gap-4">
+            <span class="inline-flex items-center gap-1.5"><span class="w-3 h-0.5 bg-cyan-400 inline-block"></span>Avg score</span>
+            <span class="inline-flex items-center gap-1.5"><span class="w-3 h-0.5 bg-green-400 inline-block"></span>Match rate</span>
+          </div>
+          <span x-text="historyChartDateLabel(historyChartJobs()[historyChartJobs().length-1])"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <template x-for="job in historyJobs" :key="job.id??job.job_id">
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5 hover:border-slate-500 transition cursor-pointer"
+             @click="openHistoryJob(job)">
+          <div class="flex items-start justify-between">
+            <div class="flex-1 min-w-0">
+              <!-- Experiment name -->
+              <p class="font-semibold text-white truncate"
+                 x-text="job.experiment_name || 'Untitled experiment'"></p>
+              <!-- Pipeline badges -->
+              <div class="flex gap-1.5 mt-1.5 mb-1">
+                <span class="text-xs px-1.5 py-0.5 rounded bg-surface-700 text-slate-400">GMAPS</span>
+                <span x-show="job.manual_associations_enabled" class="text-xs px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">KNOWN</span>
+                <span x-show="job.haiku_enabled" class="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">HAIKU</span>
+                <span x-show="job.perplexity_enabled" class="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400">PERPLEXITY</span>
+                <span x-show="job.haiku_validation_enabled" class="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">HAIKU VAL</span>
+                <span x-show="job.salesforce_enrichment_enabled" class="text-xs px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">SF</span>
+                <span x-show="job.legacy_enrichment_enabled" class="text-xs px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400">LEGACY</span>
+                <span x-show="job.bing_maps_enabled" class="text-xs px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">BING MAPS</span>
+                <span x-show="job.web_search_fallback_enabled" class="text-xs px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400">WEB</span>
+              </div>
+              <p class="text-xs text-slate-500">
+                <span class="font-mono text-slate-600" x-text="(job.id??job.job_id)+' · '"></span>
+                <span x-text="job.file_name??'—'"></span>
+                <span class="ml-1" x-text="'· '+formatDate(job.created_at)"></span>
+              </p>
+              <p x-show="job.experiment_notes" class="text-xs text-slate-500 mt-0.5 italic" x-text="job.experiment_notes"></p>
+              <!-- Parent job reference -->
+              <p x-show="job.parent_job_id" class="text-xs text-violet-400 mt-0.5">
+                ↳ follow-up on <span class="font-mono" x-text="job.parent_job_id"></span>
+                <span x-show="job.source_filter" x-text="' ('+job.source_filter+')'"></span>
+              </p>
+            </div>
+            <div class="text-right ml-4 flex-shrink-0 space-y-1">
+              <div class="flex items-center gap-2 justify-end">
+                <span class="px-2 py-0.5 rounded-full text-xs font-semibold"
+                      :class="job.status==='done'?'bg-green-500/20 text-green-400':job.status==='cancelled'?'bg-amber-500/20 text-amber-400':job.status==='error'?'bg-red-500/20 text-red-400':'bg-blue-500/20 text-blue-400'"
+                      x-text="job.status"></span>
+              </div>
+              <p class="text-sm">
+                <span class="text-green-400 font-semibold" x-text="job.tier_high??'—'"></span><span class="text-slate-500 text-xs"> H </span>
+                <span class="text-amber-400 font-semibold" x-text="job.tier_medium??'—'"></span><span class="text-slate-500 text-xs"> M </span>
+                <span class="text-red-400 font-semibold" x-text="job.tier_low??'—'"></span><span class="text-slate-500 text-xs"> L</span>
+              </p>
+              <p class="text-xs text-slate-400">
+                <span x-text="(job.completed_rows??job.completed??0).toLocaleString()"></span>/
+                <span x-text="(job.valid_rows??job.total??0).toLocaleString()"></span>
+              </p>
+              <p class="text-xs font-mono">
+                <span class="text-amber-400" x-text="'H:$'+(job.haiku_cost_usd??0).toFixed(4)"></span>
+                <span x-show="(job.perplexity_cost_usd??0)>0" class="text-violet-400 ml-1" x-text="'P:$'+(job.perplexity_cost_usd??0).toFixed(4)"></span>
+              </p>
+              <p class="text-xs text-slate-500" x-show="(job.historical_from_salesforce??0)+(job.historical_from_legacy??0)>0">
+                <span class="text-emerald-400" x-text="'SF '+(job.historical_from_salesforce??0)"></span>
+                <span class="text-cyan-400 ml-1" x-text="'LEG '+(job.historical_from_legacy??0)"></span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+
+<!-- KNOWN URLS -->
+<div x-show="page==='manual'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-6xl space-y-5">
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-xl font-bold text-white">Known URL Associations</h2>
+        <p class="text-sm text-slate-400">Manual, auditable company-location-to-website evidence.</p>
+      </div>
+      <button @click="loadManualAssociations()" class="text-slate-400 hover:text-white text-sm transition">Refresh</button>
+    </div>
+
+    <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+      <p class="text-sm font-semibold text-slate-300 mb-4" x-text="manualEditId?'Edit association':'Add association'"></p>
+      <div class="grid md:grid-cols-4 gap-3">
+        <input x-model="manualForm.source_company" placeholder="Company" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <input x-model="manualForm.source_city" placeholder="City" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <input x-model="manualForm.source_state" placeholder="State" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <input x-model="manualForm.source_country" placeholder="Country" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+      </div>
+      <div class="grid md:grid-cols-[2fr_1fr_1fr_1fr] gap-3 mt-3">
+        <input x-model="manualForm.known_url" placeholder="Known URL" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <select x-model="manualForm.association_type" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500">
+          <option value="current_official_site">Current official site</option>
+          <option value="known_dba_site">Known DBA site</option>
+          <option value="old_domain_replaced">Old domain replaced</option>
+          <option value="location_changed">Location changed</option>
+        </select>
+        <input x-model="manualForm.verified_by" placeholder="Verified by" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+        <input type="date" x-model="manualForm.verified_at" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+      </div>
+      <textarea x-model="manualForm.notes" rows="2" placeholder="Notes" class="mt-3 w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"></textarea>
+      <div class="flex gap-3 mt-3">
+        <button @click="saveManualAssociation()" class="bg-brand-600 hover:bg-brand-700 text-white font-semibold px-5 py-2 rounded-lg text-sm transition" x-text="manualEditId?'Save Changes':'Add Known URL'"></button>
+        <button x-show="manualEditId" @click="resetManualForm()" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-5 py-2 rounded-lg text-sm transition">Cancel Edit</button>
+      </div>
+    </div>
+
+    <div class="bg-surface-800 border border-surface-700 rounded-xl overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-surface-900 text-slate-500 uppercase">
+            <tr>
+              <th class="px-4 py-2 text-left">Company</th>
+              <th class="px-3 py-2 text-left">Location</th>
+              <th class="px-3 py-2 text-left">URL</th>
+              <th class="px-3 py-2 text-left">Type</th>
+              <th class="px-3 py-2 text-left">Verified</th>
+              <th class="px-3 py-2 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="row in manualAssociations" :key="row.id">
+              <tr class="border-t border-surface-700 hover:bg-surface-700/40">
+                <td class="px-4 py-2 text-slate-200" x-text="row.source_company"></td>
+                <td class="px-3 py-2 text-slate-400" x-text="[row.source_city,row.source_state,row.source_country].filter(Boolean).join(', ')"></td>
+                <td class="px-3 py-2 max-w-[240px]">
+                  <a :href="row.known_url" target="_blank" class="text-brand-500 hover:underline truncate block" x-text="row.known_url"></a>
+                  <p x-show="row.notes" class="text-slate-500 truncate" :title="row.notes" x-text="row.notes"></p>
+                </td>
+                <td class="px-3 py-2 text-slate-400 font-mono" x-text="row.association_type"></td>
+                <td class="px-3 py-2 text-slate-400">
+                  <span x-text="row.verified_by||'—'"></span>
+                  <span class="text-slate-600" x-text="row.verified_at?' · '+row.verified_at:''"></span>
+                </td>
+                <td class="px-3 py-2 text-right space-x-2">
+                  <button @click="editManualAssociation(row)" class="text-slate-300 hover:text-white">Edit</button>
+                  <button @click="deleteManualAssociation(row.id)" class="text-red-400 hover:text-red-300">Delete</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="!manualAssociations.length"><td colspan="6" class="px-4 py-6 text-center text-slate-600">No known URL associations yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ REPORT ════ -->
+<div x-show="page==='report'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-2xl">
+    <button @click="page='history'" class="flex items-center gap-1 text-slate-400 hover:text-white text-sm mb-5 transition">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+      Back
+    </button>
+
+    <template x-if="reportError">
+      <div class="bg-surface-800 border border-amber-500/30 rounded-xl p-5">
+        <p class="text-sm font-semibold text-amber-400">Report not available</p>
+        <p class="text-sm text-slate-400 mt-2" x-text="reportError"></p>
+        <button @click="page='history'; reportError=''" class="mt-4 bg-surface-700 hover:bg-surface-600 text-slate-200 px-4 py-2 rounded-lg text-sm transition">Back to history</button>
+      </div>
+    </template>
+
+    <template x-if="activeReport">
+      <div class="space-y-5">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-xs text-slate-500 uppercase tracking-wider mb-0.5">Experiment</p>
+            <h2 class="text-xl font-bold text-white" x-text="activeReport.experiment_name||'Untitled'"></h2>
+            <p class="text-xs text-slate-400 font-mono mt-0.5" x-text="activeReport.job_id"></p>
+            <p class="text-xs text-slate-500 mt-0.5" x-text="formatDate(activeReport.run_date)"></p>
+          </div>
+          <div class="flex gap-2">
+            <button @click="openApiCalls(activeReport.job_id)"
+              class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-4 py-2 rounded-lg text-sm transition">
+              API Calls
+            </button>
+            <button @click="openFollowup(activeReport.job_id)"
+              class="bg-violet-600/20 hover:bg-violet-600/30 text-violet-400 border border-violet-500/30 px-4 py-2 rounded-lg text-sm transition">
+              Follow-up Pass
+            </button>
+            <a :href="'/api/job/'+activeReport.job_id+'/download'"
+               class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm transition flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              Download
+            </a>
+          </div>
+        </div>
+
+        <!-- Pipeline used -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Pipeline Configuration</p>
+          <div class="flex gap-2 flex-wrap">
+            <span class="text-xs px-2 py-1 rounded bg-surface-700 text-slate-300">GMAPS (always)</span>
+            <span x-show="activeReport.pipeline?.manual_associations_enabled" class="text-xs px-2 py-1 rounded bg-green-500/10 text-green-400 border border-green-500/20">Known URLs</span>
+            <span x-show="activeReport.pipeline?.haiku_enabled" class="text-xs px-2 py-1 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">HAIKU initial</span>
+            <span x-show="activeReport.pipeline?.perplexity_enabled" class="text-xs px-2 py-1 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">PERPLEXITY</span>
+            <span x-show="activeReport.pipeline?.haiku_validation_enabled" class="text-xs px-2 py-1 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">HAIKU validation</span>
+            <span x-show="activeReport.pipeline?.salesforce_enrichment_enabled" class="text-xs px-2 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Salesforce</span>
+            <span x-show="activeReport.pipeline?.legacy_enrichment_enabled" class="text-xs px-2 py-1 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">Legacy DB</span>
+            <span x-show="activeReport.pipeline?.bing_maps_enabled" class="text-xs px-2 py-1 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">Bing Maps</span>
+            <span x-show="activeReport.pipeline?.web_search_fallback_enabled" class="text-xs px-2 py-1 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">Web fallback</span>
+          </div>
+          <p x-show="activeReport.pipeline?.perplexity_trigger" class="text-xs text-slate-500 mt-2">
+            Perplexity trigger: <span class="text-slate-300" x-text="activeReport.pipeline?.perplexity_trigger"></span>
+          </p>
+        </div>
+
+        <!-- Confidence -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-4">Confidence</p>
+          <div class="grid grid-cols-4 gap-3 text-center mb-3">
+            <div><p class="text-2xl font-bold text-green-400" x-text="activeReport.confidence?.high?.count??0"></p><p class="text-xs text-slate-500 mt-1" x-text="'High ('+( activeReport.confidence?.high?.pct??0)+'%)'"></p></div>
+            <div><p class="text-2xl font-bold text-amber-400" x-text="activeReport.confidence?.medium?.count??0"></p><p class="text-xs text-slate-500 mt-1" x-text="'Medium ('+(activeReport.confidence?.medium?.pct??0)+'%)'"></p></div>
+            <div><p class="text-2xl font-bold text-red-400" x-text="activeReport.confidence?.low?.count??0"></p><p class="text-xs text-slate-500 mt-1" x-text="'Low ('+(activeReport.confidence?.low?.pct??0)+'%)'"></p></div>
+            <div><p class="text-2xl font-bold text-slate-500" x-text="activeReport.confidence?.unresolved?.count??0"></p><p class="text-xs text-slate-500 mt-1" x-text="'Unresolved ('+(activeReport.confidence?.unresolved?.pct??0)+'%)'"></p></div>
+          </div>
+          <p class="text-xs text-slate-400">
+            Avg score: <span class="text-white font-semibold" x-text="activeReport.confidence?.avg_score??'—'"></span>
+            <span class="mx-2 text-slate-600">|</span>
+            Range: <span class="text-white font-semibold" x-text="(activeReport.confidence?.score_range??['—','—']).join(' – ')"></span>
+          </p>
+        </div>
+
+        <!-- URL sources -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">URL Sources</p>
+          <div class="grid grid-cols-4 md:grid-cols-9 gap-4 text-center text-sm">
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.url_sources?.from_gmaps??0"></p><p class="text-xs text-slate-500 mt-1">From Maps</p></div>
+            <div><p class="text-xl font-bold text-violet-400" x-text="activeReport.url_sources?.from_perplexity??0"></p><p class="text-xs text-slate-500 mt-1">From Perplexity</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="activeReport.url_sources?.from_manual??0"></p><p class="text-xs text-slate-500 mt-1">From Known URLs</p></div>
+            <div><p class="text-xl font-bold text-emerald-400" x-text="activeReport.url_sources?.from_salesforce??0"></p><p class="text-xs text-slate-500 mt-1">From Salesforce</p></div>
+            <div><p class="text-xl font-bold text-cyan-400" x-text="activeReport.url_sources?.from_legacy??0"></p><p class="text-xs text-slate-500 mt-1">From Legacy DB</p></div>
+            <div><p class="text-xl font-bold text-blue-400" x-text="activeReport.url_sources?.from_bing_maps??0"></p><p class="text-xs text-slate-500 mt-1">From Bing Maps</p></div>
+            <div><p class="text-xl font-bold text-sky-400" x-text="activeReport.url_sources?.from_web_bing??0"></p><p class="text-xs text-slate-500 mt-1">From Bing</p></div>
+            <div><p class="text-xl font-bold text-sky-300" x-text="activeReport.url_sources?.from_web_duckduckgo??0"></p><p class="text-xs text-slate-500 mt-1">From DDG</p></div>
+            <div><p class="text-xl font-bold text-amber-400" x-text="activeReport.url_sources?.url_changed??0"></p><p class="text-xs text-slate-500 mt-1">URL corrected</p></div>
+          </div>
+        </div>
+
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs text-slate-400 uppercase tracking-wider">Search Candidates</p>
+            <button @click="openSearchCandidates(activeReport.job_id)" class="text-xs text-brand-500 hover:underline">View drilldown</button>
+          </div>
+          <div class="grid grid-cols-3 md:grid-cols-7 gap-4 text-center text-sm">
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.search_candidates?.evaluated??0"></p><p class="text-xs text-slate-500 mt-1">Evaluated</p></div>
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.search_candidates?.gmaps_attempts??0"></p><p class="text-xs text-slate-500 mt-1">Maps attempts</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="activeReport.search_candidates?.gmaps_retry_recovered??0"></p><p class="text-xs text-slate-500 mt-1">Maps retry wins</p></div>
+            <div><p class="text-xl font-bold text-blue-400" x-text="activeReport.search_candidates?.bing_maps_recovered??0"></p><p class="text-xs text-slate-500 mt-1">Bing Maps wins</p></div>
+            <div><p class="text-xl font-bold text-sky-400" x-text="activeReport.search_candidates?.web_search_recovered??0"></p><p class="text-xs text-slate-500 mt-1">Web wins</p></div>
+            <div><p class="text-xl font-bold text-slate-300" x-text="activeReport.search_candidates?.web_candidates??0"></p><p class="text-xs text-slate-500 mt-1">Web candidates</p></div>
+            <div><p class="text-xl font-bold text-red-400" x-text="activeReport.search_candidates?.rejected??0"></p><p class="text-xs text-slate-500 mt-1">Rejected</p></div>
+          </div>
+        </div>
+
+        <!-- Manual associations -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Known URL Associations</p>
+          <div class="grid grid-cols-4 gap-4 text-center text-sm">
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.manual_associations?.rows_with_candidates??0"></p><p class="text-xs text-slate-500 mt-1">Rows with candidates</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="activeReport.manual_associations?.accepted_candidates??0"></p><p class="text-xs text-slate-500 mt-1">Accepted candidates</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="activeReport.manual_associations?.final_urls??0"></p><p class="text-xs text-slate-500 mt-1">Final URLs</p></div>
+            <div><p class="text-xl font-bold" :class="activeReport.manual_associations?.enabled?'text-green-400':'text-slate-500'" x-text="activeReport.manual_associations?.enabled?'On':'Off'"></p><p class="text-xs text-slate-500 mt-1">Enabled</p></div>
+          </div>
+        </div>
+
+        <!-- Historical enrichment -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Historical Enrichment</p>
+          <div class="grid grid-cols-5 gap-4 text-center text-sm">
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.historical_enrichment?.rows_with_candidates??0"></p><p class="text-xs text-slate-500 mt-1">Rows with candidates</p></div>
+            <div><p class="text-xl font-bold text-green-400" x-text="activeReport.historical_enrichment?.accepted_candidates??0"></p><p class="text-xs text-slate-500 mt-1">Accepted candidates</p></div>
+            <div><p class="text-xl font-bold text-emerald-400" x-text="activeReport.historical_enrichment?.from_salesforce??0"></p><p class="text-xs text-slate-500 mt-1">Final from Salesforce</p></div>
+            <div><p class="text-xl font-bold text-cyan-400" x-text="activeReport.historical_enrichment?.from_legacy??0"></p><p class="text-xs text-slate-500 mt-1">Final from Legacy DB</p></div>
+            <div><p class="text-xl font-bold" :class="(activeReport.historical_enrichment?.errors??0)>0?'text-amber-400':'text-slate-500'" x-text="activeReport.historical_enrichment?.errors??0"></p><p class="text-xs text-slate-500 mt-1">Source errors</p></div>
+            <div><p class="text-xl font-bold text-slate-200" x-text="activeReport.historical_enrichment?.legacy_raw_rows??0"></p><p class="text-xs text-slate-500 mt-1">Legacy raw rows</p></div>
+            <div><p class="text-xl font-bold text-slate-200" x-text="activeReport.historical_enrichment?.legacy_rows_with_email??0"></p><p class="text-xs text-slate-500 mt-1">Legacy email rows</p></div>
+            <div><p class="text-xl font-bold text-cyan-400" x-text="activeReport.historical_enrichment?.legacy_usable_domains??0"></p><p class="text-xs text-slate-500 mt-1">Usable domains</p></div>
+            <div><p class="text-xl font-bold text-amber-400" x-text="activeReport.historical_enrichment?.legacy_filtered_domains??0"></p><p class="text-xs text-slate-500 mt-1">Filtered domains</p></div>
+          </div>
+        </div>
+
+        <!-- Cost breakdown -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Cost & Usage</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between border-b border-surface-700 pb-2">
+              <span class="text-amber-400">Haiku</span>
+              <span class="font-mono text-amber-400" x-text="'$'+(activeReport.haiku?.cost_usd??0).toFixed(6)"></span>
+            </div>
+            <div class="ml-4 space-y-1 text-xs text-slate-400">
+              <div class="flex justify-between"><span>Initial calls</span><span x-text="activeReport.haiku?.calls_initial??0"></span></div>
+              <div class="flex justify-between"><span>Validation calls</span><span x-text="activeReport.haiku?.calls_validation??0"></span></div>
+              <div class="flex justify-between"><span>Input tokens</span><span x-text="(activeReport.haiku?.input_tokens??0).toLocaleString()"></span></div>
+              <div class="flex justify-between"><span>Output tokens</span><span x-text="(activeReport.haiku?.output_tokens??0).toLocaleString()"></span></div>
+              <div class="flex justify-between text-red-400" x-show="(activeReport.haiku?.truncated_responses??0)>0">
+                <span>⚠ Truncated responses</span><span x-text="activeReport.haiku?.truncated_responses"></span>
+              </div>
+            </div>
+            <div class="flex justify-between border-b border-surface-700 pb-2 pt-1">
+              <span class="text-violet-400">Perplexity</span>
+              <span class="font-mono text-violet-400" x-text="'$'+(activeReport.perplexity?.cost_usd??0).toFixed(6)"></span>
+            </div>
+            <div class="ml-4 space-y-1 text-xs text-slate-400">
+              <div class="flex justify-between"><span>Calls</span><span x-text="activeReport.perplexity?.calls??0"></span></div>
+              <div class="flex justify-between"><span>Total citations</span><span x-text="activeReport.perplexity?.total_citations??0"></span></div>
+            </div>
+            <div class="flex justify-between pt-1 text-white font-semibold">
+              <span>Total</span>
+              <span class="font-mono" x-text="'$'+(activeReport.cost?.total_usd??0).toFixed(6)"></span>
+            </div>
+            <p class="text-xs text-slate-500">Per record: <span x-text="'$'+(activeReport.cost?.cost_per_record??0).toFixed(6)"></span></p>
+          </div>
+        </div>
+
+        <!-- Performance -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-2">Performance</p>
+          <p class="text-sm text-slate-300">Avg latency: <span class="text-white font-semibold" x-text="(activeReport.performance?.avg_total_latency_ms??0).toLocaleString()"></span> ms per record</p>
+        </div>
+
+        <!-- Runtime diagnostics -->
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Runtime Diagnostics</p>
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-center text-sm mb-4">
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.job_settings?.scrape_workers??'—'"></p><p class="text-xs text-slate-500 mt-1">Scrape workers</p></div>
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.job_settings?.validate_workers??'—'"></p><p class="text-xs text-slate-500 mt-1">Validate workers</p></div>
+            <div><p class="text-xl font-bold text-white" x-text="activeReport.runtime?.run_duration_sec??activeReport.duration_sec??'—'"></p><p class="text-xs text-slate-500 mt-1">Run seconds</p></div>
+            <div><p class="text-xl font-bold" :class="activeReport.runtime?.stale_detected?'text-amber-400':'text-slate-300'" x-text="activeReport.runtime?.stale_detected?'Yes':'No'"></p><p class="text-xs text-slate-500 mt-1">Stale closed</p></div>
+            <div><p class="text-xl font-bold" :class="(activeReport.runtime?.worker_error_count??0)>0?'text-red-400':'text-slate-300'" x-text="activeReport.runtime?.worker_error_count??0"></p><p class="text-xs text-slate-500 mt-1">Worker errors</p></div>
+          </div>
+          <div class="grid md:grid-cols-2 gap-3 text-xs text-slate-400">
+            <p>Host: <span class="text-slate-200" x-text="activeReport.runtime?.host_name??'—'"></span></p>
+            <p>PID: <span class="text-slate-200" x-text="activeReport.runtime?.process_id??'—'"></span></p>
+            <p>Last progress: <span class="text-slate-200" x-text="formatDate(activeReport.runtime?.last_progress_at)"></span></p>
+            <p>Last heartbeat: <span class="text-slate-200" x-text="formatDate(activeReport.runtime?.last_heartbeat_at)"></span></p>
+            <p>Max heartbeat gap: <span class="text-slate-200" x-text="(activeReport.runtime?.max_heartbeat_gap_sec??0).toLocaleString()"></span>s</p>
+            <p>Stale timeout: <span class="text-slate-200" x-text="activeReport.runtime?.stale_timeout_sec??activeReport.job_settings?.job_stall_timeout_seconds??'—'"></span>s</p>
+            <p>Active rows at close: <span class="text-slate-200" x-text="activeReport.runtime?.active_rows_at_close_count??0"></span></p>
+          </div>
+          <p x-show="activeReport.runtime?.stale_reason" class="text-xs text-amber-400 mt-3" x-text="activeReport.runtime?.stale_reason"></p>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- SEARCH CANDIDATES -->
+<div x-show="page==='candidates'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-7xl">
+    <div class="flex items-center justify-between mb-5">
+      <button @click="page=prevPage||'history'" class="flex items-center gap-1 text-slate-400 hover:text-white text-sm transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        Back
+      </button>
+      <h2 class="text-lg font-bold text-white">Search Candidates</h2>
+      <span class="text-xs text-slate-500 font-mono" x-text="searchCandidatesJobId"></span>
+    </div>
+
+    <div class="bg-surface-800 border border-surface-700 rounded-xl overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-surface-900 text-slate-500 uppercase">
+            <tr>
+              <th class="px-4 py-2 text-left">Company</th>
+              <th class="px-3 py-2 text-left">Source</th>
+              <th class="px-3 py-2 text-left">Mode</th>
+              <th class="px-3 py-2 text-left">Query</th>
+              <th class="px-3 py-2 text-right">Rank</th>
+              <th class="px-3 py-2 text-left">Candidate</th>
+              <th class="px-3 py-2 text-right">Score</th>
+              <th class="px-3 py-2 text-left">Verdict</th>
+              <th class="px-3 py-2 text-left">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="c in searchCandidates" :key="c.id">
+              <tr class="border-t border-surface-700 hover:bg-surface-700/40"
+                  :class="c.selected?'bg-green-500/10':''">
+                <td class="px-4 py-2 text-slate-200 max-w-[220px] truncate" x-text="c.company"></td>
+                <td class="px-3 py-2">
+                  <span class="px-1.5 py-0.5 rounded text-xs"
+                        :class="c.source==='gmaps'?'bg-slate-500/10 text-slate-300':(c.source==='web_bing'?'bg-sky-500/10 text-sky-400':'bg-sky-400/10 text-sky-300')"
+                        x-text="c.source"></span>
+                </td>
+                <td class="px-3 py-2 text-slate-400 font-mono" x-text="c.mode"></td>
+                <td class="px-3 py-2 text-slate-400 max-w-[260px] truncate" x-text="c.query"></td>
+                <td class="px-3 py-2 text-right text-slate-400 font-mono" x-text="c.rank"></td>
+                <td class="px-3 py-2 max-w-[260px]">
+                  <a x-show="c.url" :href="c.url" target="_blank" class="text-brand-500 hover:underline truncate block" x-text="(c.title||c.url||'').slice(0,70)"></a>
+                  <span x-show="!c.url" class="text-slate-600" x-text="c.error||'No URL'"></span>
+                  <p class="text-slate-500 truncate" x-text="c.address_or_snippet||''"></p>
+                </td>
+                <td class="px-3 py-2 text-right font-mono font-semibold" :class="scoreColor(c.identity_score)" x-text="c.identity_score??0"></td>
+                <td class="px-3 py-2 text-slate-300" x-text="c.identity_verdict"></td>
+                <td class="px-3 py-2 text-slate-500 max-w-[300px] truncate" x-text="c.identity_reason"></td>
+              </tr>
+            </template>
+            <tr x-show="!searchCandidates.length">
+              <td colspan="9" class="px-4 py-8 text-center text-slate-600">No candidates recorded for this job.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ API CALLS ════ -->
+<div x-show="page==='calls'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-5xl">
+    <div class="flex items-center justify-between mb-5">
+      <button @click="page=prevPage||'history'" class="flex items-center gap-1 text-slate-400 hover:text-white text-sm transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        Back
+      </button>
+      <h2 class="text-lg font-bold text-white">API Calls</h2>
+      <span class="text-xs text-slate-500 font-mono" x-text="apiCallsJobId"></span>
+    </div>
+
+    <!-- Summary by provider -->
+    <div class="grid grid-cols-3 gap-3 mb-5">
+      <template x-for="[provider, calls] in Object.entries(callsByProvider)" :key="provider">
+        <div class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p class="text-xs font-semibold mb-2"
+             :class="provider==='anthropic' ? 'text-amber-400' : (provider==='perplexity' ? 'text-violet-400' : 'text-slate-300')"
+             x-text="provider.toUpperCase()"></p>
+          <p class="text-2xl font-bold text-white" x-text="calls.length"></p>
+          <p class="text-xs text-slate-500">calls</p>
+          <p class="text-xs font-mono mt-1"
+             :class="provider==='anthropic'?'text-amber-400':'text-violet-400'"
+             x-text="'$'+calls.reduce((s,c)=>s+(c.cost_usd||0),0).toFixed(5)"></p>
+          <p class="text-xs text-red-400 mt-0.5" x-show="calls.filter(c=>c.stop_reason==='max_tokens').length>0"
+             x-text="calls.filter(c=>c.stop_reason==='max_tokens').length+' truncated'"></p>
+        </div>
+      </template>
+    </div>
+
+    <!-- Calls table -->
+    <div class="bg-surface-800 border border-surface-700 rounded-xl overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="bg-surface-900 text-slate-500 uppercase">
+            <tr>
+              <th class="px-4 py-2 text-left">Company</th>
+              <th class="px-3 py-2 text-left">Provider</th>
+              <th class="px-3 py-2 text-left">Stage</th>
+              <th class="px-3 py-2 text-left">Model</th>
+              <th class="px-3 py-2 text-right">In tok</th>
+              <th class="px-3 py-2 text-right">Out tok</th>
+              <th class="px-3 py-2 text-right">Cost</th>
+              <th class="px-3 py-2 text-right">Latency</th>
+              <th class="px-3 py-2 text-left">Stop</th>
+              <th class="px-3 py-2 text-right">Citations</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="(c, i) in apiCalls" :key="i">
+              <tr class="border-t border-surface-700 hover:bg-surface-700/40">
+                <td class="px-4 py-2 text-slate-300 truncate max-w-[120px]" x-text="c.company"></td>
+                <td class="px-3 py-2">
+                  <span class="px-1.5 py-0.5 rounded text-xs font-semibold"
+                        :class="c.provider==='anthropic'?'bg-amber-500/10 text-amber-400':'bg-violet-500/10 text-violet-400'"
+                        x-text="c.provider"></span>
+                </td>
+                <td class="px-3 py-2 text-slate-400 font-mono" x-text="c.stage"></td>
+                <td class="px-3 py-2 text-slate-500 font-mono text-xs" x-text="(c.model||'').split('-').slice(-1)[0]"></td>
+                <td class="px-3 py-2 text-right text-slate-400" x-text="(c.input_tokens||0).toLocaleString()"></td>
+                <td class="px-3 py-2 text-right text-slate-400" x-text="(c.output_tokens||0).toLocaleString()"></td>
+                <td class="px-3 py-2 text-right font-mono"
+                    :class="c.provider==='anthropic'?'text-amber-400':'text-violet-400'"
+                    x-text="'$'+(c.cost_usd||0).toFixed(5)"></td>
+                <td class="px-3 py-2 text-right text-slate-400" x-text="c.latency_ms?c.latency_ms+'ms':'—'"></td>
+                <td class="px-3 py-2">
+                  <span :class="c.stop_reason==='max_tokens'?'text-red-400':c.stop_reason==='end_turn'||c.stop_reason==='stop'?'text-green-400/60':'text-slate-500'"
+                        x-text="c.stop_reason||'—'"></span>
+                </td>
+                <td class="px-3 py-2 text-right">
+                  <template x-if="c.citations?.length>0">
+                    <button @click="showCitations(c)"
+                      class="text-violet-400 hover:text-violet-300 underline"
+                      x-text="c.citations.length+' sources'"></button>
+                  </template>
+                  <span x-show="!c.citations?.length" class="text-slate-600">—</span>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- HELP -->
+<div x-show="page==='help'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-4xl space-y-5">
+    <div>
+      <p class="text-xs text-slate-500 uppercase tracking-wider mb-1">Reference</p>
+      <h2 class="text-2xl font-bold text-white mb-2">How Magpie Scores Website Matches</h2>
+      <p class="text-sm text-slate-400 max-w-3xl">
+        Magpie is trying to answer one question: does this website appear to belong to the same company in the source file?
+        The score is an identity score, not an AI opinion, search rank, popularity score, or guarantee that the business is active.
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-4">
+      <div class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+        <p class="text-xs text-slate-500 uppercase tracking-wider mb-2">1. Input</p>
+        <h3 class="font-semibold text-white mb-2">Start With The Source Row</h3>
+        <p class="text-sm text-slate-400">Company name, city, state, and country are treated as the identity we are trying to match.</p>
+      </div>
+      <div class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+        <p class="text-xs text-slate-500 uppercase tracking-wider mb-2">2. Candidates</p>
+        <h3 class="font-semibold text-white mb-2">Find Possible Websites</h3>
+        <p class="text-sm text-slate-400">Google Maps always runs. Known URLs, Salesforce, legacy DB, and Perplexity can add candidate URLs when enabled.</p>
+      </div>
+      <div class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+        <p class="text-xs text-slate-500 uppercase tracking-wider mb-2">3. Decision</p>
+        <h3 class="font-semibold text-white mb-2">Score Each URL</h3>
+        <p class="text-sm text-slate-400">Each candidate URL is scored separately. The final URL is the strongest candidate that clears the run threshold.</p>
+      </div>
+    </div>
+
+    <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+      <h3 class="font-semibold text-white mb-3">Plain-English Scorecard</h3>
+      <div class="space-y-4 text-sm">
+        <div class="grid md:grid-cols-[180px_1fr] gap-3">
+          <p class="text-slate-300 font-medium">Company match</p>
+          <p class="text-slate-400">Compares the source company name to the Maps listing name or Perplexity official name. Exact or near-exact names are strong. Shared generic words are weaker.</p>
+        </div>
+        <div class="grid md:grid-cols-[180px_1fr] gap-3">
+          <p class="text-slate-300 font-medium">Domain match</p>
+          <p class="text-slate-400">Compares the website domain to distinctive company words, acronyms, and initials. This supports the decision but is weaker than clear company and location evidence.</p>
+        </div>
+        <div class="grid md:grid-cols-[180px_1fr] gap-3">
+          <p class="text-slate-300 font-medium">Location match</p>
+          <p class="text-slate-400">Looks for city and state evidence from Maps address data or search evidence. Same city and state helps. A different state is treated as a serious warning.</p>
+        </div>
+        <div class="grid md:grid-cols-[180px_1fr] gap-3">
+          <p class="text-slate-300 font-medium">Caps and penalties</p>
+          <p class="text-slate-400">Weak name/domain evidence is capped. Contradicting locations are capped. Directory, social-profile, and provider-profile URLs are kept out of final results unless manually verified.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-3">How To Read The Score</h3>
+        <div class="space-y-3 text-sm text-slate-400">
+          <p><span class="text-green-400 font-semibold">High</span> means the deterministic identity verdict is accepted. This is usually a strong match, but review the evidence for important imports.</p>
+          <p><span class="text-amber-400 font-semibold">Medium</span> means the deterministic identity verdict is review and the location does not contradict the source row.</p>
+          <p><span class="text-red-400 font-semibold">Low</span> means the candidate is weak, contradictory, or not promoted to a final URL. Treat it as unresolved unless a human confirms it.</p>
+          <p><span class="text-slate-300 font-semibold">No candidate</span> is a valid outcome. A blank URL is better than inventing a wrong website.</p>
+        </div>
+      </div>
+      <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+        <h3 class="font-semibold text-white mb-3">What AI Does And Does Not Decide</h3>
+        <div class="space-y-3 text-sm text-slate-400">
+          <p>Perplexity may help find candidate URLs and provide search evidence.</p>
+          <p>Known URLs are manually verified associations and remain auditable local evidence.</p>
+          <p>Salesforce and legacy DB can provide prior website evidence, but only as read-only candidate sources.</p>
+          <p>Haiku may inspect website text when enabled.</p>
+          <p>The final confidence score is calculated by Magpie from identity evidence. AI/provider confidence numbers should not be treated as ground truth.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-surface-800 border border-surface-700 rounded-xl p-5">
+      <h3 class="font-semibold text-white mb-3">Evidence Columns To Review</h3>
+      <div class="grid md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">final_url</span> is the selected website candidate.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">final_confidence_score</span> is 0 when no URL is selected.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">url_source</span> shows whether it came from Maps, Perplexity, Known URLs, Salesforce, or legacy DB.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">company_match_score</span> measures company-name alignment.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">domain_match_score</span> measures URL/domain alignment.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">location_match_level</span> summarizes city/state evidence.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">identity_reason</span> shows the short score explanation.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">historical_identity_score</span> scores Salesforce or legacy candidates.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">historical_source</span> shows whether prior evidence came from Salesforce or legacy DB.</p>
+        <p class="text-slate-400"><span class="text-slate-300 font-mono">manual_identity_score</span> scores manually verified candidates.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div x-show="page==='settings'" x-cloak class="flex-1 overflow-auto p-8">
+  <div class="max-w-lg">
+    <h2 class="text-xl font-bold text-white mb-1">Settings</h2>
+    <p class="text-slate-400 text-sm mb-6">Default values — overridable per experiment.</p>
+    <div class="space-y-4">
+      <template x-for="[key, meta] in settingsMeta">
+        <div class="bg-surface-800 rounded-xl border border-surface-700 p-4">
+          <label class="block text-sm font-medium text-slate-300 mb-0.5" x-text="meta.label"></label>
+          <p class="text-xs text-slate-500 mb-2" x-text="meta.desc"></p>
+          <template x-if="meta.type==='bool'">
+            <input type="checkbox" x-model="settingsForm[key]" class="rounded border-slate-600 bg-surface-700 text-brand-500"/>
+          </template>
+          <template x-if="meta.type==='select'">
+            <select x-model="settingsForm[key]" class="bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <template x-for="opt in meta.options"><option :value="opt.value" x-text="opt.label"></option></template>
+            </select>
+          </template>
+          <template x-if="!meta.type||meta.type==='number'||meta.type==='float'||meta.type==='text'">
+            <input :type="meta.type==='text'?'text':'number'" :step="meta.type==='float'?'0.01':'1'"
+                   x-model="settingsForm[key]"
+                   class="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white
+                          focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+          </template>
+        </div>
+      </template>
+    </div>
+    <div class="mt-5 flex gap-3">
+      <button @click="saveSettings()" class="bg-brand-600 hover:bg-brand-700 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition">Save</button>
+      <button @click="loadSettings()" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-6 py-2.5 rounded-lg text-sm transition">Reset</button>
+    </div>
+    <p x-show="settingsSaved" class="text-green-400 text-sm mt-3">✓ Saved.</p>
+  </div>
+</div>
+
+</main>
+</div>
+
+<!-- Citation modal -->
+<div x-show="citationModal" x-cloak @click.self="citationModal=null"
+     class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-8">
+  <div class="bg-surface-800 border border-surface-700 rounded-xl p-6 w-full max-w-lg">
+    <div class="flex items-center justify-between mb-4">
+      <p class="font-semibold text-white">Perplexity Sources</p>
+      <button @click="citationModal=null" class="text-slate-400 hover:text-white">✕</button>
+    </div>
+    <p class="text-xs text-slate-500 mb-3" x-text="citationModal?.company"></p>
+    <div class="space-y-2">
+      <template x-for="(url, i) in (citationModal?.citations||[])">
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-500 w-4" x-text="i+1"></span>
+          <a :href="url" target="_blank" class="text-violet-400 hover:underline text-sm truncate" x-text="url"></a>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+
+<!-- Follow-up modal -->
+<div x-show="followupModal" x-cloak @click.self="followupModal=null"
+     class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-8">
+  <div class="bg-surface-800 border border-surface-700 rounded-xl p-6 w-full max-w-md">
+    <p class="font-semibold text-white mb-4">Follow-up Pass</p>
+    <p class="text-xs text-slate-400 mb-3">Run a new experiment on a filtered subset of <span class="font-mono text-brand-500" x-text="followupModal"></span></p>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs text-slate-400 block mb-1">Filter records</label>
+        <select x-model="followupFilter" class="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500">
+          <option value="status=rejected_candidate">Rejected candidates</option>
+          <option value="status=not_found">Not found on Maps</option>
+          <option value="status=low_confidence">Low confidence status</option>
+          <option value="url_source=gmaps">Maps URLs (validate with Perplexity)</option>
+          <option value="all">All records</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-slate-400 block mb-1">Experiment name</label>
+        <input type="text" x-model="followupName" placeholder="e.g. Follow-up: Perplexity on low confidence"
+          class="w-full bg-surface-700 border border-surface-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+      </div>
+      <div class="flex gap-2 pt-2">
+        <button @click="launchFollowup()"
+          class="flex-1 bg-violet-600 hover:bg-violet-700 text-white font-semibold py-2 rounded-lg text-sm transition">
+          Launch Follow-up
+        </button>
+        <button @click="followupModal=null" class="bg-surface-700 hover:bg-surface-600 text-slate-300 px-4 py-2 rounded-lg text-sm transition">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function app() { return {
+  page: 'new', prevPage: null,
+  nav: [{id:'new',label:'New Experiment'},{id:'history',label:'History'},{id:'manual',label:'Known URLs'},{id:'help',label:'Help'},{id:'settings',label:'Settings'}],
+
+  // Upload / ingest
+  step: 'upload', uploading: false, uploadError: '', fileId: null,
+  ingestReport: {},
+
+  // Experiment config
+  experiment: {name:'', notes:'', parent_job_id: null, source_filter: null},
+  useLimit: true, rowLimit: 100,
+
+  // Pipeline toggles — flat properties so x-model works reliably
+  haiku_enabled: true,
+  haiku_validation_enabled: true,
+  perplexity_enabled: false,
+  perplexity_validate: true,
+  perplexity_trigger: 'no_url_or_low_confidence',
+  manual_associations_enabled: true,
+  salesforce_enrichment_enabled: false,
+  legacy_enrichment_enabled: false,
+  bing_maps_enabled: false,
+  web_search_fallback_enabled: false,
+  bing_web_enabled: true,
+  duckduckgo_web_enabled: true,
+
+  // Job
+  jobId: null, jobDone: false, jobCancelled: false, jobErrored: false, jobReport: null,
+  prog: {completed:0,total:0,found:0,errors:0,worker_errors:0,haiku_cost_usd:0,perplexity_cost_usd:0,total_cost_usd:0},
+  recentLogs: [], errors: [], activeRows: [], recentStageEvents: [], jobStream: null,
+
+  // History
+  historyJobs: [],
+  totalHaikuSpend: 0, totalPerplexitySpend: 0,
+
+  // Report
+  activeReport: null, reportError: '',
+
+  // Manual associations
+  manualAssociations: [],
+  manualForm: {
+    source_company:'', source_city:'', source_state:'', source_country:'United States',
+    known_url:'', association_type:'current_official_site', notes:'', verified_by:'Alex',
+    verified_at:new Date().toISOString().slice(0,10), status:'active'
+  },
+  manualEditId: null,
+
+  // API calls
+  apiCalls: [], apiCallsJobId: null, callsByProvider: {},
+
+  // Search candidates
+  searchCandidates: [], searchCandidatesJobId: null,
+
+  // Modals
+  citationModal: null,
+  followupModal: null, followupFilter: 'status=rejected_candidate', followupName: '',
+
+  // Settings
+  settingsForm: {}, settingsSaved: false,
+  settingsMeta: [
+    ['haiku_confidence_threshold', {label:'Haiku confidence threshold', desc:'Below this, Haiku passes to Perplexity. Default: 65', type:'number'}],
+    ['scrape_workers',             {label:'Scrape workers', desc:'Parallel Chrome instances', type:'number'}],
+    ['validate_workers',           {label:'Validate workers', desc:'Parallel AI threads', type:'number'}],
+    ['job_stall_timeout_seconds',  {label:'Job stale timeout (s)', desc:'Save a partial cancelled run after this long with no completed rows. Default: 1800', type:'number'}],
+    ['jina_timeout_seconds',       {label:'Jina timeout (s)', desc:'Max wait for page fetch', type:'number'}],
+    ['max_scrape_errors',          {label:'Max scrape errors', desc:'Retry Maps on genuine errors only', type:'number'}],
+    ['gmaps_max_candidates_per_mode', {label:'Maps candidates per mode', desc:'Listings to inspect per Maps query mode. Default: 5', type:'number'}],
+    ['gmaps_strong_stop_score',       {label:'Maps early-stop score', desc:'Stop Maps retry modes when an accepted candidate reaches this score. Default: 90', type:'number'}],
+    ['web_search_max_results',        {label:'Web search max results', desc:'Best-effort Bing/DuckDuckGo candidates per row. Default: 10', type:'number'}],
+    ['haiku_model',                {label:'Haiku model', desc:'claude-haiku-4-5-20251001', type:'text'}],
+    ['perplexity_model',           {label:'Perplexity model', desc:'sonar or sonar-pro', type:'text'}],
+    ['haiku_input_price_per_million',  {label:'Haiku input price ($/M tokens)', desc:'Update if Anthropic changes pricing', type:'float'}],
+    ['haiku_output_price_per_million', {label:'Haiku output price ($/M tokens)', type:'float'}],
+    ['perplexity_input_price_per_million',  {label:'Perplexity input price ($/M tokens)', type:'float'}],
+    ['perplexity_output_price_per_million', {label:'Perplexity output price ($/M tokens)', type:'float'}],
+    ['perplexity_search_fee_per_request',   {label:'Perplexity search fee ($ per call)', type:'float'}],
+    ['historical_enrichment_min_score',     {label:'Historical min score', desc:'Minimum deterministic identity score needed to accept Salesforce or legacy candidates. Default: 85', type:'number'}],
+    ['salesforce_enrichment_objects',       {label:'Salesforce objects', desc:'Comma-separated read-only objects: Account, Lead, Contact', type:'text'}],
+  ],
+
+  async init() { await this.loadSettings(); await this.loadHistory(); await this.loadManualAssociations(); },
+
+  // ── File handling
+  async handleFileSelect(e) { const f=e.target.files[0]; if(f) await this.uploadFile(f); },
+  handleDrop(e) { const f=e.dataTransfer.files[0]; if(f) this.uploadFile(f); },
+  async uploadFile(file) {
+    this.uploadError=''; this.uploading=true;
+    const form=new FormData(); form.append('file',file);
+    try {
+      const r=await fetch('/api/upload',{method:'POST',body:form});
+      if(!r.ok) throw new Error(await r.text());
+      const d=await r.json(); this.fileId=d.file_id;
+      await this.runIngest();
+    } catch(e){ this.uploadError=e.message; } finally { this.uploading=false; }
+  },
+  async runIngest() {
+    const r=await fetch(`/api/ingest/${this.fileId}`,{method:'POST'});
+    if(!r.ok){ this.uploadError='Ingest failed.'; return; }
+    this.ingestReport=await r.json(); this.step='config';
+  },
+
+  // ── Job
+  async startJob() {
+    const body={
+      file_id:   this.fileId,
+      limit:     this.useLimit?Number(this.rowLimit):null,
+      experiment: this.experiment,
+      pipeline: {
+        haiku_enabled: this.haiku_enabled,
+        haiku_validation_enabled: this.haiku_validation_enabled,
+        perplexity_enabled: this.perplexity_enabled,
+        perplexity_validate: this.perplexity_validate,
+        perplexity_trigger: this.perplexity_trigger,
+        manual_associations_enabled: this.manual_associations_enabled,
+        salesforce_enrichment_enabled: this.salesforce_enrichment_enabled,
+        legacy_enrichment_enabled: this.legacy_enrichment_enabled,
+        bing_maps_enabled: this.bing_maps_enabled,
+        web_search_fallback_enabled: this.web_search_fallback_enabled,
+        bing_web_enabled: this.bing_web_enabled,
+        duckduckgo_web_enabled: this.duckduckgo_web_enabled,
+      },
+      job_settings: Object.fromEntries(
+        Object.entries(this.settingsForm)
+          .filter(([k])=>['haiku_confidence_threshold',
+                          'scrape_workers','validate_workers','job_stall_timeout_seconds','jina_timeout_seconds','max_scrape_errors',
+                          'gmaps_max_candidates_per_mode','gmaps_strong_stop_score','web_search_max_results'].includes(k))
+          .map(([k,v])=>[k,Number(v)])
+      ),
+    };
+    const r=await fetch('/api/job/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){alert('Failed to start job.');return;}
+    const d=await r.json();
+    this.jobId=d.job_id; this.jobDone=false; this.jobCancelled=false; this.jobErrored=false; this.jobReport=null;
+    this.prog={completed:0,total:d.total,found:0,errors:0,worker_errors:0,haiku_cost_usd:0,perplexity_cost_usd:0,total_cost_usd:0};
+    this.recentLogs=[]; this.errors=[]; this.activeRows=[]; this.recentStageEvents=[];
+    this.step='running';
+    this.listenToJob(d.job_id);
+  },
+  listenToJob(jobId) {
+    if(this.jobStream) {
+      try { this.jobStream.close(); } catch {}
+      this.jobStream=null;
+    }
+    const src=new EventSource(`/api/job/${jobId}/stream`);
+    this.jobStream=src;
+    src.onmessage=(e)=>{
+      const ev=JSON.parse(e.data);
+      if(ev.type==='progress') {
+        this.prog={...this.prog,...ev.data};
+        if(ev.data.active_rows) this.activeRows=ev.data.active_rows;
+      }
+      else if(ev.type==='log') { this.recentLogs.unshift(ev.data); if(this.recentLogs.length>10) this.recentLogs.pop(); }
+      else if(ev.type==='stage') {
+        if(ev.data.active_rows) this.activeRows=ev.data.active_rows;
+        if(ev.data.worker_errors!==undefined) this.prog={...this.prog,worker_errors:ev.data.worker_errors};
+        if(ev.data.event) { this.recentStageEvents.unshift(ev.data.event); if(this.recentStageEvents.length>25) this.recentStageEvents.pop(); }
+      }
+      else if(ev.type==='worker_error') {
+        this.errors.push(`${ev.data.stage||'worker'}: ${ev.data.message}`);
+        this.prog={...this.prog,worker_errors:ev.data.worker_errors??(this.prog.worker_errors+1)};
+        if(ev.data.active_rows) this.activeRows=ev.data.active_rows;
+      }
+      else if(ev.type==='error') {
+        this.errors.push(ev.data.message || 'Job failed.');
+        this.jobErrored=true;
+        this.jobDone=false;
+        if(ev.data) {
+          this.prog={
+            ...this.prog,
+            completed: ev.data.completed??this.prog.completed,
+            total: ev.data.total??this.prog.total,
+            found: ev.data.found??this.prog.found,
+            errors: ev.data.errors??this.prog.errors,
+            worker_errors: ev.data.worker_errors??this.prog.worker_errors,
+          };
+          if(ev.data.active_rows) this.activeRows=ev.data.active_rows;
+        }
+        src.close(); this.jobStream=null; this.loadHistory();
+      }
+      else if(ev.type==='cancelled') { this.jobCancelled=true; }
+      else if(ev.type==='done') {
+        this.jobDone=true; this.jobReport=ev.data.report||null;
+        this.totalHaikuSpend+=ev.data.haiku_cost_usd||0;
+        this.totalPerplexitySpend+=ev.data.perplexity_cost_usd||0;
+        src.close(); this.jobStream=null; this.loadHistory();
+      }
+    };
+    src.onerror=()=>{ src.close(); if(this.jobStream===src) this.jobStream=null; };
+  },
+  async cancelJob() {
+    if(!this.jobId) return;
+    await fetch(`/api/job/${this.jobId}/cancel`,{method:'POST'});
+    this.jobCancelled=true;
+  },
+  resetForNew() {
+    this.step='upload'; this.fileId=null; this.ingestReport={};
+    this.jobId=null; this.jobDone=false; this.jobCancelled=false; this.jobErrored=false; this.jobReport=null;
+    this.experiment={name:'',notes:'',parent_job_id:null,source_filter:null};
+    this.recentLogs=[]; this.errors=[]; this.activeRows=[]; this.recentStageEvents=[];
+  },
+
+  // ── History
+  async loadHistory() {
+    const r=await fetch('/api/jobs'); if(!r.ok) return;
+    this.historyJobs=await r.json();
+    this.totalHaikuSpend=this.historyJobs.reduce((s,j)=>s+(j.haiku_cost_usd||0),0);
+    this.totalPerplexitySpend=this.historyJobs.reduce((s,j)=>s+(j.perplexity_cost_usd||0),0);
+  },
+  historyMetric(job) {
+    const total = Number(job.completed_rows ?? job.completed ?? job.valid_rows ?? job.total ?? 0);
+    const matched = Number(job.tier_high ?? 0) + Number(job.tier_medium ?? 0);
+    const matchRate = total > 0 ? Math.round((matched / total) * 1000) / 10 : null;
+    const rawScore = job.avg_confidence_score;
+    const score = rawScore === null || rawScore === undefined || rawScore === '' ? null : Number(rawScore);
+    return {
+      total,
+      matched,
+      matchRate,
+      score,
+      matchLabel: matchRate === null ? '—' : `${matchRate.toFixed(1)}%`,
+      matchCountLabel: total > 0 ? `${matched.toLocaleString()} final / ${(total - matched).toLocaleString()} without` : '',
+      scoreLabel: score === null || Number.isNaN(score) ? '—' : score.toFixed(1),
+    };
+  },
+  historyChartJobs() {
+    return [...this.historyJobs]
+      .filter(j => j.status === 'done' && this.historyMetric(j).total > 0)
+      .sort((a,b) => new Date(a.completed_at || a.created_at || 0) - new Date(b.completed_at || b.created_at || 0));
+  },
+  latestHistoryMetric() {
+    const jobs = this.historyChartJobs();
+    if(!jobs.length) return null;
+    return this.historyMetric(jobs[jobs.length - 1]);
+  },
+  historyChartX(index, count) {
+    if(count <= 1) return 44;
+    return 44 + (index * (656 / (count - 1)));
+  },
+  historyChartY(value) {
+    const v = Math.max(0, Math.min(100, Number(value) || 0));
+    return 178 - (v * 1.58);
+  },
+  historyChartPoints(metric) {
+    const jobs = this.historyChartJobs();
+    return jobs.map((job, index) => {
+      const m = this.historyMetric(job);
+      const value = metric === 'score' ? m.score : m.matchRate;
+      return {
+        id: job.id ?? job.job_id ?? index,
+        x: this.historyChartX(index, jobs.length),
+        y: this.historyChartY(value),
+        value,
+        label: `${job.experiment_name || 'Untitled'}: ${metric === 'score' ? m.scoreLabel : `${m.matchLabel} (${m.matched}/${m.total})`}`,
+      };
+    }).filter(p => p.value !== null && !Number.isNaN(p.value));
+  },
+  historyChartPath(metric) {
+    const points = this.historyChartPoints(metric);
+    return points.map((p, i) => `${i ? 'L' : 'M'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+  },
+  historyChartDateLabel(job) {
+    if(!job) return '';
+    const value = job.completed_at || job.created_at;
+    if(!value) return '';
+    try {
+      return new Date(value).toLocaleDateString([], {month:'short', day:'numeric'});
+    } catch {
+      return value;
+    }
+  },
+  async openHistoryJob(job) {
+    const jobId = job.id ?? job.job_id;
+    if(job.status === 'running') {
+      await this.resumeRunningJob(jobId, job);
+    } else {
+      await this.openReport(jobId);
+    }
+  },
+  async resumeRunningJob(jobId, historyRow={}) {
+    const r=await fetch(`/api/job/${jobId}/status`);
+    if(!r.ok) {
+      this.reportError='This job is marked running in history, but its live status is not available. Refresh history; if it remains running, restart the app so orphaned jobs are closed.';
+      this.activeReport=null; this.page='report';
+      return;
+    }
+    const d=await r.json();
+    this.jobId=jobId;
+    this.jobDone=d.status==='done';
+    this.jobCancelled=d.status==='cancelled';
+    this.jobErrored=d.status==='error';
+    this.jobReport=d.report||null;
+    this.prog={
+      completed:Number(d.completed??d.completed_rows??0),
+      total:Number(d.total??d.valid_rows??historyRow.valid_rows??0),
+      found:Number(d.found??d.has_website??0),
+      errors:Number(d.errors??d.error_count??0),
+      worker_errors:Number(d.worker_errors??d.worker_error_count??0),
+      haiku_cost_usd:Number(d.haiku_cost_usd??0),
+      perplexity_cost_usd:Number(d.perplexity_cost_usd??0),
+      total_cost_usd:Number(d.total_cost_usd??d.cost_usd??0),
+    };
+    this.activeRows=d.active_rows || d.runtime?.active_rows || this.parseJsonArray(d.active_worker_snapshot);
+    this.recentStageEvents=d.recent_stage_events || [];
+    this.recentLogs=[];
+    this.errors=[];
+    this.experiment=d.experiment || {
+      name: historyRow.experiment_name || '',
+      notes: historyRow.experiment_notes || '',
+      parent_job_id: historyRow.parent_job_id || null,
+      source_filter: historyRow.source_filter || null,
+    };
+    this.page='new';
+    this.step='running';
+    if(d.status==='running') this.listenToJob(jobId);
+  },
+  async openReport(jobId) {
+    this.activeReport=null; this.reportError=''; this.page='report';
+    const r=await fetch(`/api/job/${jobId}/report`);
+    if(r.ok) this.activeReport=await r.json();
+    else this.reportError='This job does not have a completed report yet. If it is still running, open it from History to reattach to the live job view.';
+  },
+
+  // ── API calls
+  async openApiCalls(jobId) {
+    this.prevPage=this.page; this.page='calls';
+    this.apiCallsJobId=jobId; this.apiCalls=[];
+    const r=await fetch(`/api/job/${jobId}/api_calls`);
+    if(r.ok) {
+      this.apiCalls=await r.json();
+      const byP={};
+      for(const c of this.apiCalls) {
+        if(!byP[c.provider]) byP[c.provider]=[];
+        byP[c.provider].push(c);
+      }
+      this.callsByProvider=byP;
+    }
+  },
+  showCitations(call) { this.citationModal={company:call.company, citations:call.citations||[]}; },
+
+  async openSearchCandidates(jobId) {
+    this.prevPage=this.page; this.page='candidates';
+    this.searchCandidatesJobId=jobId; this.searchCandidates=[];
+    const r=await fetch(`/api/job/${jobId}/search_candidates`);
+    if(r.ok) this.searchCandidates=await r.json();
+  },
+
+  // Manual associations
+  async loadManualAssociations() {
+    const r=await fetch('/api/manual_associations');
+    if(r.ok) this.manualAssociations=await r.json();
+  },
+  resetManualForm() {
+    this.manualEditId=null;
+    this.manualForm={
+      source_company:'', source_city:'', source_state:'', source_country:'United States',
+      known_url:'', association_type:'current_official_site', notes:'', verified_by:'Alex',
+      verified_at:new Date().toISOString().slice(0,10), status:'active'
+    };
+  },
+  editManualAssociation(row) {
+    this.manualEditId=row.id;
+    this.manualForm={...row};
+    this.page='manual';
+  },
+  async saveManualAssociation() {
+    if(!this.manualForm.source_company || !this.manualForm.known_url) {
+      alert('Company and known URL are required.'); return;
+    }
+    const url=this.manualEditId?`/api/manual_associations/${this.manualEditId}`:'/api/manual_associations';
+    const method=this.manualEditId?'PUT':'POST';
+    const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(this.manualForm)});
+    if(!r.ok){alert('Failed to save known URL.');return;}
+    await this.loadManualAssociations();
+    this.resetManualForm();
+  },
+  async deleteManualAssociation(id) {
+    if(!confirm('Delete this known URL association?')) return;
+    const r=await fetch(`/api/manual_associations/${id}`,{method:'DELETE'});
+    if(!r.ok){alert('Delete failed.');return;}
+    await this.loadManualAssociations();
+  },
+
+  // ── Follow-up
+  openFollowup(jobId) { this.followupModal=jobId; },
+  async launchFollowup() {
+    const parentJobId = this.followupModal;
+    const name = this.followupName || `Follow-up on ${parentJobId}`;
+    const r=await fetch('/api/job/followup',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        parent_job_id: parentJobId,
+        source_filter: this.followupFilter,
+        pipeline: {
+          haiku_enabled: this.haiku_enabled,
+          haiku_validation_enabled: this.haiku_validation_enabled,
+          perplexity_enabled: this.perplexity_enabled,
+          perplexity_validate: this.perplexity_validate,
+          perplexity_trigger: this.perplexity_trigger,
+          manual_associations_enabled: this.manual_associations_enabled,
+          salesforce_enrichment_enabled: this.salesforce_enrichment_enabled,
+          legacy_enrichment_enabled: this.legacy_enrichment_enabled,
+          bing_maps_enabled: this.bing_maps_enabled,
+          web_search_fallback_enabled: this.web_search_fallback_enabled,
+          bing_web_enabled: this.bing_web_enabled,
+          duckduckgo_web_enabled: this.duckduckgo_web_enabled,
+        },
+        experiment:    {name, notes:''},
+        job_settings:  {},
+      })
+    });
+    if(!r.ok){alert('Follow-up failed.');return;}
+    const d=await r.json();
+    this.followupModal=null;
+    this.jobId=d.job_id; this.jobDone=false; this.jobCancelled=false; this.jobErrored=false; this.jobReport=null;
+    this.prog={completed:0,total:d.total,found:0,errors:0,worker_errors:0,haiku_cost_usd:0,perplexity_cost_usd:0,total_cost_usd:0};
+    this.recentLogs=[]; this.errors=[]; this.activeRows=[]; this.recentStageEvents=[];
+    this.step='running'; this.page='new';
+    this.experiment={name, notes:''};
+    this.listenToJob(d.job_id);
+  },
+
+  // ── Shutdown
+  async shutdownServer() {
+    if(!confirm('Shut down the Magpie server?')) return;
+    try { await fetch('/api/shutdown',{method:'POST'}); } catch {}
+    document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0f172a;color:#94a3b8;font-family:monospace;font-size:14px;">Server stopped. Run <code style="color:#3b82f6;margin:0 6px">python run.py</code> to restart.</div>';
+  },
+
+  // ── Settings
+  async loadSettings() {
+    const r=await fetch('/api/settings'); const s=await r.json(); this.settingsForm={...s};
+    this.haiku_enabled = !!s.haiku_enabled;
+    this.haiku_validation_enabled = !!s.haiku_validation_enabled;
+    this.perplexity_enabled = !!s.perplexity_enabled;
+    this.perplexity_validate = !!s.perplexity_validate;
+    this.perplexity_trigger = s.perplexity_trigger || this.perplexity_trigger;
+    this.manual_associations_enabled = !!s.manual_associations_enabled;
+    this.salesforce_enrichment_enabled = !!s.salesforce_enrichment_enabled && !!s.salesforce_enrichment_configured;
+    this.legacy_enrichment_enabled = !!s.legacy_enrichment_enabled && !!s.legacy_enrichment_configured;
+    this.bing_maps_enabled = !!s.bing_maps_enabled;
+    this.web_search_fallback_enabled = !!s.web_search_fallback_enabled;
+    this.bing_web_enabled = !!s.bing_web_enabled;
+    this.duckduckgo_web_enabled = !!s.duckduckgo_web_enabled;
+  },
+  async saveSettings() {
+    const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(this.settingsForm)});
+    if(r.ok){this.settingsSaved=true;setTimeout(()=>this.settingsSaved=false,3000);}
+  },
+
+  // ── Helpers
+  get pct() { return Math.min(100,Math.round(((this.prog.completed||0)/(this.prog.total||1))*100)); },
+  formatDate(iso) { if(!iso) return '—'; try{return new Date(iso).toLocaleString();}catch{return iso;} },
+  formatElapsed(ms) { if(ms==null) return '--'; const sec=Math.round(Number(ms)/1000); if(sec<60) return sec+'s'; return Math.floor(sec/60)+'m '+(sec%60)+'s'; },
+  parseJsonArray(value) { if(!value) return []; if(Array.isArray(value)) return value; try { const parsed=JSON.parse(value); return Array.isArray(parsed)?parsed:[]; } catch { return []; } },
+  scoreColor(s) { if(s==null) return 'text-slate-500'; if(s>=70) return 'text-green-400'; if(s>=40) return 'text-amber-400'; return 'text-red-400'; },
+  dropSamples(reason) { return (this.ingestReport.sample_drops_by_reason||{})[reason] || []; },
+  tierBadge(t) {
+    if(t==='High')   return 'bg-green-500/20 text-green-400';
+    if(t==='Medium') return 'bg-amber-500/20 text-amber-400';
+    if(t==='Low')    return 'bg-red-500/20 text-red-400';
+    return 'bg-surface-700 text-slate-400';
+  },
+  estimatedCost(provider) {
+    const rows = this.useLimit ? Number(this.rowLimit) : (this.ingestReport.total_valid || 100);
+    if (provider === 'haiku')       return (rows * 0.00032).toFixed(3);
+    if (provider === 'perplexity')  return (rows * 0.005).toFixed(2);
+    return '0';
+  },
+}; }
+</script>
+</body>
+</html>

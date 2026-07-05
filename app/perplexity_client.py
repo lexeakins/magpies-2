@@ -178,29 +178,46 @@ def _parse_response(content: str, mode: str, existing_url: str | None) -> dict:
 
     if "not found" in reason.lower() or reject_reason:
         url = None
-    if url and not d.get("is_official") and not d.get("is_correct"):
+    is_official = _to_bool_or_none(d.get("is_official"))
+    is_correct = _to_bool_or_none(d.get("is_correct"))
+
+    if url and not is_official and not is_correct:
         url = None
 
     if mode == "validate":
         # If Perplexity says the original URL is correct, use it
-        if d.get("is_correct") and not url:
+        if is_correct and not url:
             url = existing_url
         # If url is same as existing, mark as confirmed
         if url and existing_url and url.rstrip("/") == existing_url.rstrip("/"):
-            d["is_correct"] = True
+            is_correct = True
 
     return {
         "url":        url,
         "reason":     reason,
-        "is_correct": d.get("is_correct"),   # validate mode only
+        "is_correct": is_correct,   # validate mode only
         "official_name":     str(d.get("official_name", "")),
         "evidence_location": str(d.get("evidence_location", "")),
         "evidence_url":      str(d.get("evidence_url", "")),
         "company_match":     str(d.get("company_match", "")),
         "location_match":    str(d.get("location_match", "")),
-        "is_official":       d.get("is_official"),
+        "is_official":       is_official,
         "reject_reason":     reject_reason,
     }
+
+
+def _to_bool_or_none(value):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n", ""}:
+            return False
+    return None
 
 
 def _error(error: str, latency_ms: int) -> dict:

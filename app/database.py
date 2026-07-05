@@ -42,7 +42,11 @@ jobs = Table("jobs", metadata,
 
     # Input
     Column("file_name",             Text),
+    Column("source_file_hash",      Text),
     Column("total_rows_raw",        Integer, default=0),
+    Column("source_total_valid_rows", Integer, default=0),
+    Column("valid_row_start",       Integer, default=1),
+    Column("valid_row_end",         Integer),
     Column("valid_rows",            Integer, default=0),
 
     # Pipeline config (snapshot keys for quick display)
@@ -146,6 +150,8 @@ job_results = Table("job_results", metadata,
     Column("state",                 Text),
     Column("country",               Text),
     Column("source_sheet",          Text),
+    Column("source_excel_row",      Integer),
+    Column("source_valid_index",    Integer),
 
     # GMaps output
     Column("gmaps_found",           Boolean),
@@ -405,6 +411,10 @@ def _migrate():
         ("pipeline_snapshot",     "TEXT"),
         ("job_settings_snapshot", "TEXT"),
         ("runtime_snapshot",      "TEXT"),
+        ("source_file_hash",      "TEXT"),
+        ("source_total_valid_rows", "INTEGER DEFAULT 0"),
+        ("valid_row_start",       "INTEGER DEFAULT 1"),
+        ("valid_row_end",         "INTEGER"),
         ("haiku_enabled",         "INTEGER"),
         ("perplexity_enabled",    "INTEGER"),
         ("haiku_validation_enabled", "INTEGER"),
@@ -456,6 +466,8 @@ def _migrate():
     ])
     _add_missing_cols("job_results", [
         ("gmaps_confidence_score",    "INTEGER"),
+        ("source_excel_row",          "INTEGER"),
+        ("source_valid_index",        "INTEGER"),
         ("haiku_initial_confidence",  "INTEGER"),
         ("haiku_initial_match",       "INTEGER"),
         ("haiku_initial_stop_reason", "TEXT"),
@@ -602,13 +614,23 @@ def save_job_start(job_id: str, file_name: str, valid_rows: int,
                    pipeline_config: dict, experiment: dict,
                    settings_snapshot: dict, created_at: str,
                    job_settings_snapshot: dict | None = None,
-                   runtime_snapshot: dict | None = None):
+                   runtime_snapshot: dict | None = None,
+                   source_file_hash: str | None = None,
+                   total_rows_raw: int | None = None,
+                   source_total_valid_rows: int | None = None,
+                   valid_row_start: int | None = None,
+                   valid_row_end: int | None = None):
     with engine.begin() as conn:
         conn.execute(insert(jobs).values(
             id                    = job_id,
             created_at            = created_at,
             status                = "running",
             file_name             = file_name,
+            source_file_hash      = source_file_hash,
+            total_rows_raw        = total_rows_raw,
+            source_total_valid_rows = source_total_valid_rows,
+            valid_row_start       = valid_row_start,
+            valid_row_end         = valid_row_end,
             valid_rows            = valid_rows,
             experiment_name       = experiment.get("name", ""),
             experiment_notes      = experiment.get("notes", ""),

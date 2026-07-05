@@ -56,6 +56,7 @@ class Lead:
     country: str
     source_sheet: str
     original_row_idx: int
+    source_valid_index: int = 0
 
 
 @dataclass
@@ -293,6 +294,7 @@ def ingest_file(file_path: str) -> Tuple[List[Lead], CleanseReport]:
                     country=country.strip(),
                     source_sheet=sheet_name,
                     original_row_idx=row_num,
+                    source_valid_index=len(all_leads) + 1,
                 ))
 
     wb.close()

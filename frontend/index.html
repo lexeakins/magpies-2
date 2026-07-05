@@ -116,6 +116,7 @@
             <div>
               <p class="font-semibold text-white">File ready</p>
               <p class="text-xs text-slate-400" x-text="ingestReport.file_name"></p>
+              <p class="text-xs text-slate-600 font-mono" x-show="ingestReport.file_hash" x-text="'sha256 '+shortHash(ingestReport.file_hash)"></p>
             </div>
           </div>
           <div class="grid grid-cols-3 gap-3 text-center mb-3">
@@ -333,17 +334,28 @@
           </div>
         </div>
 
-        <!-- Row limit + run -->
+        <!-- Row range + run -->
         <div class="bg-surface-800 rounded-xl border border-surface-700 p-5">
           <p class="text-sm font-semibold text-slate-300 mb-3">Run options</p>
-          <div class="flex items-center gap-3 mb-2">
-            <input type="checkbox" id="lim" x-model="useLimit" class="rounded border-slate-600 bg-surface-700 text-brand-500"/>
-            <label for="lim" class="text-sm text-slate-300">Limit to first</label>
-            <input type="number" x-model="rowLimit" min="1" :disabled="!useLimit"
+          <div class="flex flex-wrap items-center gap-3 mb-2">
+            <input type="checkbox" id="lim" x-model="useRange" class="rounded border-slate-600 bg-surface-700 text-brand-500"/>
+            <label for="lim" class="text-sm text-slate-300">Run valid rows</label>
+            <input type="number" x-model="rowStart" min="1" :max="ingestReport.total_valid||1" :disabled="!useRange"
               class="w-24 bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white
                      disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
-            <span class="text-sm text-slate-400">rows</span>
+            <span class="text-sm text-slate-500">through</span>
+            <input type="number" x-model="rowEnd" min="1" :max="ingestReport.total_valid||1" :disabled="!useRange"
+              class="w-24 bg-surface-700 border border-surface-600 rounded-lg px-3 py-1.5 text-sm text-white
+                     disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            <span class="text-sm text-slate-400" x-text="useRange ? runRangeLabel : 'all valid rows'"></span>
+            <button type="button" x-show="continueRangeAvailable()" @click="applyContinueRange()"
+              class="ml-auto px-3 py-1.5 rounded-lg text-xs text-brand-300 border border-brand-500/30 hover:bg-brand-500/10 transition">
+              Continue
+            </button>
           </div>
+          <p class="text-xs text-slate-500 mb-2">
+            Ranges are 1-based positions after invalid rows are dropped. Use 1001-2000 after a 1-1000 run on the same file hash.
+          </p>
           <p class="text-xs text-slate-500">
             Est. cost:
             <span x-show="haiku_enabled" class="text-amber-400">Haiku ~$<span x-text="estimatedCost('haiku')"></span></span>
@@ -667,6 +679,10 @@
                 <span x-text="job.file_name??'—'"></span>
                 <span class="ml-1" x-text="'· '+formatDate(job.created_at)"></span>
               </p>
+              <p x-show="job.valid_row_start && job.valid_row_end" class="text-xs text-slate-600 font-mono mt-0.5">
+                <span x-text="rangeText(job)"></span>
+                <span x-show="job.source_file_hash" x-text="' · '+shortHash(job.source_file_hash)"></span>
+              </p>
               <p x-show="job.experiment_notes" class="text-xs text-slate-500 mt-0.5 italic" x-text="job.experiment_notes"></p>
               <!-- Parent job reference -->
               <p x-show="job.parent_job_id" class="text-xs text-violet-400 mt-0.5">
@@ -822,6 +838,16 @@
               <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
               Download
             </a>
+          </div>
+        </div>
+
+        <div x-show="activeReport.source" class="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p class="text-xs text-slate-400 uppercase tracking-wider mb-3">Source Range</p>
+          <div class="grid grid-cols-4 gap-3 text-sm">
+            <div><p class="text-slate-500 text-xs">File hash</p><p class="text-slate-300 font-mono" x-text="shortHash(activeReport.source?.file_hash) || '—'"></p></div>
+            <div><p class="text-slate-500 text-xs">Valid range</p><p class="text-slate-300 font-mono" x-text="rangeText(activeReport.source) || '—'"></p></div>
+            <div><p class="text-slate-500 text-xs">Raw rows</p><p class="text-slate-300" x-text="(activeReport.source?.total_rows_raw??'—').toLocaleString?.() ?? activeReport.source?.total_rows_raw ?? '—'"></p></div>
+            <div><p class="text-slate-500 text-xs">Processed</p><p class="text-slate-300" x-text="(activeReport.source?.processed_valid_rows??activeReport.input?.valid_rows??'—').toLocaleString?.() ?? activeReport.source?.processed_valid_rows ?? '—'"></p></div>
           </div>
         </div>
 
@@ -1327,7 +1353,7 @@ function app() { return {
 
   // Experiment config
   experiment: {name:'', notes:'', parent_job_id: null, source_filter: null},
-  useLimit: true, rowLimit: 100,
+  useRange: true, rowStart: 1, rowEnd: 100,
 
   // Pipeline toggles — flat properties so x-model works reliably
   haiku_enabled: true,
@@ -1415,14 +1441,20 @@ function app() { return {
   async runIngest() {
     const r=await fetch(`/api/ingest/${this.fileId}`,{method:'POST'});
     if(!r.ok){ this.uploadError='Ingest failed.'; return; }
-    this.ingestReport=await r.json(); this.step='config';
+    this.ingestReport=await r.json();
+    this.rowStart=1;
+    this.rowEnd=Math.min(100, Number(this.ingestReport.total_valid||100));
+    this.step='config';
   },
 
   // ── Job
   async startJob() {
+    const range = this.useRange ? this.normalizedRunRange() : null;
     const body={
       file_id:   this.fileId,
-      limit:     this.useLimit?Number(this.rowLimit):null,
+      limit:     null,
+      row_start: range ? range.start : null,
+      row_end:   range ? range.end : null,
       experiment: this.experiment,
       pipeline: {
         haiku_enabled: this.haiku_enabled,
@@ -1447,7 +1479,7 @@ function app() { return {
       ),
     };
     const r=await fetch('/api/job/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){alert('Failed to start job.');return;}
+    if(!r.ok){alert(await r.text() || 'Failed to start job.');return;}
     const d=await r.json();
     this.jobId=d.job_id; this.jobDone=false; this.jobCancelled=false; this.jobErrored=false; this.jobReport=null;
     this.prog={completed:0,total:d.total,found:0,errors:0,worker_errors:0,haiku_cost_usd:0,perplexity_cost_usd:0,total_cost_usd:0};
@@ -1773,6 +1805,50 @@ function app() { return {
   parseJsonArray(value) { if(!value) return []; if(Array.isArray(value)) return value; try { const parsed=JSON.parse(value); return Array.isArray(parsed)?parsed:[]; } catch { return []; } },
   scoreColor(s) { if(s==null) return 'text-slate-500'; if(s>=70) return 'text-green-400'; if(s>=40) return 'text-amber-400'; return 'text-red-400'; },
   dropSamples(reason) { return (this.ingestReport.sample_drops_by_reason||{})[reason] || []; },
+  shortHash(hash) { return hash ? String(hash).slice(0,12) : ''; },
+  normalizedRunRange() {
+    const total = Number(this.ingestReport.total_valid || 0);
+    const start = Math.max(1, Number(this.rowStart || 1));
+    const end = Math.min(total || start, Math.max(start, Number(this.rowEnd || start)));
+    return {start, end, count: Math.max(0, end - start + 1)};
+  },
+  get runRangeLabel() {
+    const r = this.normalizedRunRange();
+    return `${r.count.toLocaleString()} rows`;
+  },
+  runRowCount() {
+    return this.useRange ? this.normalizedRunRange().count : Number(this.ingestReport.total_valid || 100);
+  },
+  rangeText(source) {
+    source = source || {};
+    const start = source.valid_row_start ?? source.row_range_start;
+    const end = source.valid_row_end ?? source.row_range_end;
+    const total = source.source_total_valid_rows ?? source.total_valid_rows;
+    if(!start || !end) return '';
+    return total ? `valid rows ${Number(start).toLocaleString()}-${Number(end).toLocaleString()} of ${Number(total).toLocaleString()}`
+                 : `valid rows ${Number(start).toLocaleString()}-${Number(end).toLocaleString()}`;
+  },
+  latestCompletedRangeForCurrentFile() {
+    const hash = this.ingestReport.file_hash;
+    if(!hash) return null;
+    const matches = this.historyJobs
+      .filter(j => j.status === 'done' && j.source_file_hash === hash && (j.valid_row_end || j.valid_row_start))
+      .sort((a,b) => Number(b.valid_row_end || 0) - Number(a.valid_row_end || 0));
+    return matches[0] || null;
+  },
+  continueRangeAvailable() {
+    const latest = this.latestCompletedRangeForCurrentFile();
+    return !!latest && Number(latest.valid_row_end || 0) < Number(this.ingestReport.total_valid || 0);
+  },
+  applyContinueRange() {
+    const latest = this.latestCompletedRangeForCurrentFile();
+    if(!latest) return;
+    const total = Number(this.ingestReport.total_valid || 0);
+    const start = Math.min(total, Number(latest.valid_row_end || 0) + 1);
+    this.useRange = true;
+    this.rowStart = start;
+    this.rowEnd = Math.min(total, start + 999);
+  },
   tierBadge(t) {
     if(t==='High')   return 'bg-green-500/20 text-green-400';
     if(t==='Medium') return 'bg-amber-500/20 text-amber-400';
@@ -1780,7 +1856,7 @@ function app() { return {
     return 'bg-surface-700 text-slate-400';
   },
   estimatedCost(provider) {
-    const rows = this.useLimit ? Number(this.rowLimit) : (this.ingestReport.total_valid || 100);
+    const rows = this.runRowCount();
     if (provider === 'haiku')       return (rows * 0.00032).toFixed(3);
     if (provider === 'perplexity')  return (rows * 0.005).toFixed(2);
     return '0';

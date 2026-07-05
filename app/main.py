@@ -1,4 +1,4 @@
-import asyncio, json, os, queue, shutil, signal, threading, time, uuid
+import asyncio, hashlib, json, os, queue, shutil, signal, threading, time, uuid
 from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -18,7 +18,15 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="Magpie App")
 app.mount("/static", StaticFiles(directory=str(FRONTEND / "static")), name="static")
 
-_ingest_cache: dict = {}   # file_id -> (leads, report, file_name)
+_ingest_cache: dict = {}   # file_id -> {leads, report, file_name, file_hash}
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ── Frontend ────────────────────────────────────────────────────────────────
@@ -52,10 +60,17 @@ async def ingest(file_id: str):
         leads, report = ingest_file(str(matches[0]))
     except Exception as exc:
         raise HTTPException(500, f"Ingest failed: {exc}")
-    _ingest_cache[file_id] = (leads, report, matches[0].name)
+    file_hash = _sha256_file(matches[0])
+    _ingest_cache[file_id] = {
+        "leads": leads,
+        "report": report,
+        "file_name": matches[0].name,
+        "file_hash": file_hash,
+    }
     return {
         "file_id":      file_id,
         "file_name":    matches[0].name,
+        "file_hash":    file_hash,
         "sheets_found": report.sheets_found,
         "total_raw":    report.total_rows_raw,
         "total_valid":  report.total_rows_valid,
@@ -75,6 +90,8 @@ async def job_start(body: dict):
     body:
       file_id          str
       limit            int | null
+      row_start        int | null  1-based inclusive valid-row position
+      row_end          int | null  1-based inclusive valid-row position
       experiment       {name, notes, parent_job_id, source_filter}
       pipeline         {haiku_enabled, haiku_validation_enabled, perplexity_enabled,
                         perplexity_validate, perplexity_trigger,
@@ -85,6 +102,8 @@ async def job_start(body: dict):
     """
     file_id     = body.get("file_id")
     limit       = body.get("limit")
+    row_start   = body.get("row_start")
+    row_end     = body.get("row_end")
     experiment  = body.get("experiment", {})
     pipeline    = body.get("pipeline", {})
     job_settings= body.get("job_settings", {})
@@ -92,9 +111,34 @@ async def job_start(body: dict):
     if file_id not in _ingest_cache:
         raise HTTPException(400, "Run /api/ingest/{file_id} first.")
 
-    leads, _, file_name = _ingest_cache[file_id]
-    if limit:
+    cached = _ingest_cache[file_id]
+    leads = cached["leads"]
+    report = cached["report"]
+    file_name = cached["file_name"]
+    file_hash = cached.get("file_hash")
+    total_valid = len(leads)
+    total_raw = report.total_rows_raw
+
+    valid_row_start = 1
+    valid_row_end = total_valid
+    if row_start is not None or row_end is not None:
+        try:
+            valid_row_start = int(row_start or 1)
+            valid_row_end = int(row_end or total_valid)
+        except Exception:
+            raise HTTPException(400, "Row range must use whole numbers.")
+        if valid_row_start < 1:
+            raise HTTPException(400, "Row range start must be 1 or greater.")
+        if valid_row_start > total_valid:
+            raise HTTPException(400, f"Row range start {valid_row_start} is past the {total_valid} valid rows in this file.")
+        valid_row_end = min(valid_row_end, total_valid)
+        if valid_row_end < valid_row_start:
+            raise HTTPException(400, "Row range end must be greater than or equal to the start.")
+        leads = leads[valid_row_start - 1:valid_row_end]
+    elif limit:
         leads = leads[:int(limit)]
+        valid_row_start = 1
+        valid_row_end = len(leads)
     if not leads:
         raise HTTPException(400, "No valid leads to process.")
 
@@ -114,9 +158,30 @@ async def job_start(body: dict):
         "bing_maps_enabled":             pipeline.get("bing_maps_enabled",             settings.bing_maps_enabled),
     }
 
-    job_id = create_job(leads, pipeline_cfg, job_settings, experiment, file_name)
+    experiment = dict(experiment or {})
+    experiment["source_file_hash"] = file_hash
+    experiment["source_total_rows_raw"] = total_raw
+    experiment["source_total_valid_rows"] = total_valid
+    experiment["valid_row_start"] = valid_row_start
+    experiment["valid_row_end"] = valid_row_end
+
+    source_metadata = {
+        "source_file_hash": file_hash,
+        "source_total_rows_raw": total_raw,
+        "source_total_valid_rows": total_valid,
+        "valid_row_start": valid_row_start,
+        "valid_row_end": valid_row_end,
+    }
+    job_id = create_job(leads, pipeline_cfg, job_settings, experiment, file_name, source_metadata)
     start_job(job_id)
-    return {"job_id": job_id, "total": len(leads)}
+    return {
+        "job_id": job_id,
+        "total": len(leads),
+        "valid_row_start": valid_row_start,
+        "valid_row_end": valid_row_end,
+        "source_total_valid_rows": total_valid,
+        "source_file_hash": file_hash,
+    }
 
 
 # ── Follow-up job (run specific stage on subset of a previous job) ────────────
@@ -204,6 +269,7 @@ async def job_status(job_id: str):
             "output":    job.output_file,
             "report":    job.report,
             "experiment":job.experiment,
+            "source":    job.source_metadata,
             "runtime": {
                 "started_at": job.started_at.isoformat() if job.started_at else None,
                 "last_progress_at": job.last_progress_at.isoformat() if job.last_progress_at else None,
@@ -213,6 +279,7 @@ async def job_status(job_id: str):
                 "stale_reason": job.stale_reason,
                 "peak_browser_count": getattr(job, "peak_browser_count", 0),
                 "worker_error_count": getattr(job, "worker_error_count", 0),
+                "in_flight_count": getattr(job, "last_in_flight_count", None),
                 "active_rows": job.active_rows_snapshot(),
             },
         }

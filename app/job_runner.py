@@ -177,6 +177,7 @@ def build_report(job: "Job") -> dict:
             "stale_reason": job.stale_reason,
             "peak_browser_count": job.peak_browser_count,
             "worker_error_count": job.worker_error_count,
+            "in_flight_count": getattr(job, "last_in_flight_count", None),
             "active_rows_at_close": active_rows,
             "active_rows_at_close_count": len(active_rows),
         },
@@ -187,6 +188,15 @@ def build_report(job: "Job") -> dict:
             "recent_stage_events": job.stage_events_snapshot(limit=25),
         },
         "input":  {"file_name": job.file_name, "valid_rows": job.total},
+        "source": {
+            "file_name": job.file_name,
+            "file_hash": job.source_metadata.get("source_file_hash"),
+            "total_rows_raw": job.source_metadata.get("source_total_rows_raw"),
+            "total_valid_rows": job.source_metadata.get("source_total_valid_rows"),
+            "valid_row_start": job.source_metadata.get("valid_row_start"),
+            "valid_row_end": job.source_metadata.get("valid_row_end"),
+            "processed_valid_rows": job.total,
+        },
         "coverage": {
             "final_urls_found": job.found_count,
             "without_final_url": job.completed - job.found_count,
@@ -332,13 +342,14 @@ def build_report(job: "Job") -> dict:
 # ---------------------------------------------------------------------------
 class Job:
     def __init__(self, job_id, leads, pipeline_cfg, job_settings,
-                 experiment, file_name=""):
+                 experiment, file_name="", source_metadata=None):
         self.job_id       = job_id
         self.leads        = leads
         self.pipeline_cfg = pipeline_cfg
         self.job_settings = job_settings
         self.experiment   = experiment
         self.file_name    = file_name
+        self.source_metadata = source_metadata or {}
         self.status       = Status.PENDING
         self.started_at: Optional[datetime]   = None
         self.completed_at: Optional[datetime] = None
@@ -353,6 +364,7 @@ class Job:
         self.environment_snapshot: dict = {}
         self.effective_job_settings: dict = {}
         self.peak_browser_count = 0
+        self.last_in_flight_count = 0
 
         self.total     = len(leads)
         self.completed = 0
@@ -604,9 +616,9 @@ _jobs: dict = {}
 _jobs_lock  = threading.Lock()
 
 
-def create_job(leads, pipeline_cfg, job_settings, experiment, file_name="") -> str:
+def create_job(leads, pipeline_cfg, job_settings, experiment, file_name="", source_metadata=None) -> str:
     job_id = str(uuid.uuid4())[:8]
-    job = Job(job_id, leads, pipeline_cfg, job_settings, experiment, file_name)
+    job = Job(job_id, leads, pipeline_cfg, job_settings, experiment, file_name, source_metadata)
     with _jobs_lock:
         _jobs[job_id] = job
     return job_id
@@ -658,6 +670,11 @@ def start_job(job_id: str):
         settings_snapshot = settings.pipeline_snapshot(),
         job_settings_snapshot = job.effective_job_settings,
         runtime_snapshot = job.environment_snapshot,
+        source_file_hash = job.source_metadata.get("source_file_hash"),
+        total_rows_raw = job.source_metadata.get("source_total_rows_raw"),
+        source_total_valid_rows = job.source_metadata.get("source_total_valid_rows"),
+        valid_row_start = job.source_metadata.get("valid_row_start"),
+        valid_row_end = job.source_metadata.get("valid_row_end"),
         created_at      = job.started_at.isoformat(),
     )
     job.emit("status", {"status": "running", "total": job.total})
@@ -1374,6 +1391,8 @@ def _run_pipeline(job: Job):
 
     while True:
         no_in_flight = counter.wait(timeout=0.5)
+        in_flight = counter.value()
+        job.last_in_flight_count = in_flight
         if submitted_all_leads and no_in_flight:
             shutdown_pool(scrape_pool)
             shutdown_pool(validate_pool)
@@ -1397,16 +1416,45 @@ def _run_pipeline(job: Job):
 
         if stale_timeout_sec > 0 and job.last_progress_at:
             idle_sec = (datetime.now(timezone.utc) - job.last_progress_at).total_seconds()
-            if counter.value() > 0 and idle_sec >= stale_timeout_sec:
+            active_rows = job.active_rows_snapshot()
+            if in_flight > 0 and not active_rows and idle_sec >= 120:
                 job.stale_detected = True
                 job.stale_reason = (
-                    f"no_completed_rows_for_{int(idle_sec)}s_with_{counter.value()}_in_flight"
+                    f"scheduler_counter_stuck_without_active_rows_for_{int(idle_sec)}s_"
+                    f"with_{in_flight}_in_flight"
+                )
+                job.cancel_event.set()
+                job.record_stage(
+                    None,
+                    "scheduler_stale_no_active_rows",
+                    "scheduler",
+                    message=job.stale_reason,
+                    details={
+                        "idle_sec": int(idle_sec),
+                        "in_flight": in_flight,
+                        "completed": job.completed,
+                        "total": job.total,
+                    },
+                )
+                job.emit("stale", {
+                    "message": "Scheduler stalled with no active rows; saving a partial run.",
+                    "idle_sec": int(idle_sec),
+                    "in_flight": in_flight,
+                    "stale_timeout_sec": 120,
+                })
+                shutdown_pool(scrape_pool)
+                shutdown_pool(validate_pool)
+                break
+            if in_flight > 0 and idle_sec >= stale_timeout_sec:
+                job.stale_detected = True
+                job.stale_reason = (
+                    f"no_completed_rows_for_{int(idle_sec)}s_with_{in_flight}_in_flight"
                 )
                 job.cancel_event.set()
                 job.emit("stale", {
                     "message": "No rows completed within the stale timeout; saving a partial run.",
                     "idle_sec": int(idle_sec),
-                    "in_flight": counter.value(),
+                    "in_flight": in_flight,
                     "stale_timeout_sec": stale_timeout_sec,
                 })
                 shutdown_pool(scrape_pool)
@@ -1470,32 +1518,43 @@ def _run_pipeline(job: Job):
                 with job._results_lock:
                     job.worker_error_count += 1
 
-                result_id = db.save_result(_result_to_db_row(job.job_id, r))
-                job.record_stage(None, "result_save_fallback_done", "persist", lead=r, details={
-                    "index": idx,
-                    "result_id": result_id,
-                    "candidate_count": len(candidate_rows),
-                })
-                if candidate_rows:
-                    try:
-                        candidate_rows = [dict(row, result_id=result_id) for row in candidate_rows]
-                        db.save_search_candidates_batch(candidate_rows)
-                        candidates_saved = True
-                        job.record_stage(None, "candidate_save_fallback_done", "persist", lead=r, details={
-                            "index": idx,
-                            "result_id": result_id,
-                            "candidate_count": len(candidate_rows),
-                        })
-                    except Exception as candidate_exc:
-                        job.record_stage(None, "candidate_save_failed", "persist", lead=r,
-                                         message=str(candidate_exc)[:250],
-                                         details={
-                                             "index": idx,
-                                             "result_id": result_id,
-                                             "candidate_count": len(candidate_rows),
-                                         })
-                        with job._results_lock:
-                            job.worker_error_count += 1
+                try:
+                    result_id = db.save_result(_result_to_db_row(job.job_id, r))
+                    job.record_stage(None, "result_save_fallback_done", "persist", lead=r, details={
+                        "index": idx,
+                        "result_id": result_id,
+                        "candidate_count": len(candidate_rows),
+                    })
+                    if candidate_rows:
+                        try:
+                            candidate_rows = [dict(row, result_id=result_id) for row in candidate_rows]
+                            db.save_search_candidates_batch(candidate_rows)
+                            candidates_saved = True
+                            job.record_stage(None, "candidate_save_fallback_done", "persist", lead=r, details={
+                                "index": idx,
+                                "result_id": result_id,
+                                "candidate_count": len(candidate_rows),
+                            })
+                        except Exception as candidate_exc:
+                            job.record_stage(None, "candidate_save_failed", "persist", lead=r,
+                                             message=str(candidate_exc)[:250],
+                                             details={
+                                                 "index": idx,
+                                                 "result_id": result_id,
+                                                 "candidate_count": len(candidate_rows),
+                                             })
+                            with job._results_lock:
+                                job.worker_error_count += 1
+                except Exception as result_exc:
+                    job.record_stage(None, "result_save_fallback_failed", "persist", lead=r,
+                                     message=str(result_exc)[:250],
+                                     details={
+                                         "index": idx,
+                                         "candidate_count": len(candidate_rows),
+                                     })
+                    with job._results_lock:
+                        job.worker_error_count += 1
+                    continue
 
             job.record_stage(None, "result_save_done", "persist", lead=r, details={
                 "index": idx,
@@ -1628,6 +1687,20 @@ def _run_pipeline(job: Job):
                 "active_worker_snapshot": json.dumps(job.active_rows_snapshot(), default=str),
                 "found_on_maps": job.maps_found_count,
                 "error_count": job.error_count,
+                "has_website": sum(1 for r in job.results if r.get("gmaps_website")),
+                "tier_high": sum(1 for r in job.results if r.get("confidence_tier") == "High"),
+                "tier_medium": sum(1 for r in job.results if r.get("confidence_tier") == "Medium"),
+                "tier_low": sum(1 for r in job.results if r.get("confidence_tier") == "Low"),
+                "tier_none": sum(1 for r in job.results if r.get("confidence_tier") is None),
+                "perplexity_calls": job.perplexity_calls,
+                "perplexity_input_tokens": job.perplexity_input_tokens,
+                "perplexity_output_tokens": job.perplexity_output_tokens,
+                "perplexity_cost_usd": job.perplexity_cost_usd,
+                "haiku_calls": job.haiku_initial_calls + job.haiku_validation_calls,
+                "haiku_input_tokens": job.haiku_input_tokens,
+                "haiku_output_tokens": job.haiku_output_tokens,
+                "haiku_cost_usd": job.haiku_cost_usd,
+                "cost_usd": job.haiku_cost_usd + job.perplexity_cost_usd,
                 "output_file": job.output_file,
                 "report_json": json.dumps(job.report) if job.report else None,
             })
@@ -2251,6 +2324,8 @@ def _build_result(ctx: dict) -> dict:
         "state":                lead.state,
         "country":              lead.country,
         "source_sheet":         lead.source_sheet,
+        "source_excel_row":     getattr(lead, "original_row_idx", None),
+        "source_valid_index":   getattr(lead, "source_valid_index", None),
         # GMaps
         "gmaps_found":          found,
         "gmaps_listing_name":   scrape.get("gmaps_listing_name"),
@@ -2375,7 +2450,7 @@ def _build_result(ctx: dict) -> dict:
 
 def _result_to_db_row(job_id: str, r: dict) -> dict:
     keys = [
-        "company","city","state","country","source_sheet",
+        "company","city","state","country","source_sheet","source_excel_row","source_valid_index",
         "gmaps_found","gmaps_listing_name","gmaps_website","gmaps_phone",
         "gmaps_address","gmaps_street","gmaps_city_scraped","gmaps_state_scraped","gmaps_zip",
         "gmaps_location_match","name_similarity","gmaps_confidence_score",
@@ -2416,7 +2491,30 @@ def _result_to_db_row(job_id: str, r: dict) -> dict:
     row = {"job_id": job_id}
     for k in keys:
         row[k] = r.get(k)
+    for k in (
+        "gmaps_found",
+        "haiku_initial_match",
+        "perplexity_is_official",
+        "haiku_final_match",
+        "url_changed",
+        "web_search_attempted",
+    ):
+        row[k] = _coerce_db_bool(row.get(k))
     return row
+
+
+def _coerce_db_bool(value):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n", ""}:
+            return False
+    return None
 
 
 def _search_candidate_to_db_row(job_id: str, result_id: int, result: dict,
@@ -2485,7 +2583,8 @@ def _cap_search_candidate_db_row(row: dict) -> dict:
 # Excel output
 # ---------------------------------------------------------------------------
 COLUMNS = [
-    "company","city","state","country","source_sheet",
+    "source_valid_index","source_sheet","source_excel_row",
+    "company","city","state","country",
     "gmaps_found","gmaps_listing_name","gmaps_website","gmaps_phone",
     "gmaps_address","gmaps_street","gmaps_city_scraped","gmaps_state_scraped","gmaps_zip",
     "gmaps_location_match",
@@ -2704,6 +2803,15 @@ def _write_report_sheet(wb, report: dict):
         ("Duration (sec)",   report["duration_sec"]),
         ("File",             report["input"]["file_name"]),
         ("Valid Rows",       report["input"]["valid_rows"]),
+    ])
+    source = report.get("source", {})
+    section("SOURCE RANGE", [
+        ("File hash",             source.get("file_hash")),
+        ("Raw rows in source",    source.get("total_rows_raw")),
+        ("Valid rows in source",  source.get("total_valid_rows")),
+        ("Valid row start",       source.get("valid_row_start")),
+        ("Valid row end",         source.get("valid_row_end")),
+        ("Processed valid rows",  source.get("processed_valid_rows")),
     ])
     pip = report.get("pipeline", {})
     section("PIPELINE CONFIG", [

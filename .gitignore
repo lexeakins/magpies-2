@@ -59,6 +59,13 @@ output/
 *.tmp
 *.bak
 
+# Local analysis/review artifacts, not application code
+manual_review_gold_results.md
+recombine_gold_rich_audit.py
+reruns_and_current_state_analysis_*.md
+*_analysis_*.md
+*Lessons Learned.md
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

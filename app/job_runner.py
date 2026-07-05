@@ -1193,6 +1193,10 @@ def _run_pipeline(job: Job):
             hist_eval.get("identity_verdict") == "accepted"
             and hist_eval.get("identity_score", 0) >= settings.historical_enrichment_min_score
         )
+        force_perplexity_validation, force_reason = _gmaps_needs_perplexity_validation(ctx)
+        if force_perplexity_validation:
+            ctx["force_perplexity_validation"] = True
+            ctx["force_perplexity_reason"] = force_reason
 
         # Route to next stage
         if manual_accepted and not (perp_on and perp_trigger == "always"):
@@ -1201,6 +1205,8 @@ def _run_pipeline(job: Job):
             finalize(ctx)
         elif bing_maps_has_url and not (perp_on and perp_trigger == "always"):
             finalize(ctx)
+        elif perp_on and force_perplexity_validation:
+            submit_validate(_perplexity_task, ctx, g_score)
         elif haiku_on and has_url:
             submit_validate(_haiku_initial_task, ctx)
         elif perp_on and _should_perplexity_run(perp_trigger, has_url, g_score, haiku_thresh):
@@ -1279,14 +1285,25 @@ def _run_pipeline(job: Job):
             [c for c in (ctx.get("search_candidates") or []) if c.get("source") == "gmaps"]
         )
         maps_context_usable = ctx.get("gmaps_context_usable", True)
+        forced_validation = bool(ctx.get("force_perplexity_validation"))
 
         trigger_score = haiku_initial_score if haiku_initial_score is not None else ctx.get("gmaps_score")
-        if not _should_perplexity_run(perp_trigger, has_url, trigger_score, haiku_thresh):
+        if not forced_validation and not _should_perplexity_run(perp_trigger, has_url, trigger_score, haiku_thresh):
             finalize(ctx); return
 
         mode = "validate" if (perp_validate and has_url) else "find"
         job.emit("perplexity", {"company": lead.company, "mode": mode})
-        job.record_stage(ctx.get("row_key"), "perplexity_start", "perplexity", lead, details={"mode": mode})
+        job.record_stage(
+            ctx.get("row_key"),
+            "perplexity_start",
+            "perplexity",
+            lead,
+            details={
+                "mode": mode,
+                "forced_gmaps_validation": forced_validation,
+                "force_reason": ctx.get("force_perplexity_reason"),
+            },
+        )
 
         result_meta = call_perplexity(
             company      = lead.company,
@@ -1305,6 +1322,35 @@ def _run_pipeline(job: Job):
 
         parsed = result_meta.get("parsed", {})
         p_url  = parsed.get("url")
+        existing_gmaps_url = scrape.get("website")
+        if (
+            forced_validation
+            and mode == "validate"
+            and result_meta.get("success")
+            and (
+                (
+                    p_url
+                    and existing_gmaps_url
+                    and p_url.rstrip("/") != existing_gmaps_url.rstrip("/")
+                )
+                or (
+                    not p_url
+                    and (
+                        parsed.get("reject_reason")
+                        or (parsed.get("company_match") or "").lower() == "none"
+                        or (parsed.get("location_match") or "").lower() == "contradiction"
+                        or parsed.get("is_official") is False
+                        or parsed.get("is_correct") is False
+                    )
+                )
+            )
+        ):
+            ctx["perplexity_rejected_gmaps_url"] = existing_gmaps_url
+            ctx["perplexity_rejected_gmaps_reason"] = (
+                parsed.get("reject_reason")
+                or parsed.get("reason")
+                or "Perplexity validation rejected or corrected the GMaps URL."
+            )
 
         ctx["perplexity"] = {
             "url":         p_url,
@@ -1739,6 +1785,42 @@ def _should_perplexity_run(trigger: str, has_url: bool,
     return False
 
 
+def _gmaps_needs_perplexity_validation(ctx: dict) -> tuple[bool, str | None]:
+    """Return True when a GMaps URL is too identity-risky to finalize alone."""
+    candidates = [
+        c for c in (ctx.get("search_candidates") or [])
+        if c.get("source") == "gmaps"
+    ]
+    best = _best_search_candidate(candidates, {"gmaps"})
+    if not best or not best.get("url"):
+        return False, None
+    evaluation = best.get("evaluation") or {}
+    if not _candidate_is_promotable(evaluation, best):
+        return False, None
+
+    verdict = evaluation.get("identity_verdict")
+    company_score = evaluation.get("company_match_score") or 0
+    domain_score = evaluation.get("domain_match_score") or 0
+    location_level = evaluation.get("location_match_level")
+    reason = (evaluation.get("identity_reason") or "").lower()
+
+    triggers = []
+    if verdict == "review":
+        triggers.append("gmaps_review_verdict")
+    if company_score < 90:
+        triggers.append(f"company_score_lt_90:{company_score}")
+    if domain_score < 75:
+        triggers.append(f"domain_score_lt_75:{domain_score}")
+    if location_level != "exact":
+        triggers.append(f"location_not_exact:{location_level or 'unknown'}")
+    if "directory_or_social_url" in reason or _is_provider_infrastructure_url(best.get("url")):
+        triggers.append("directory_or_provider_url")
+
+    if not triggers:
+        return False, None
+    return True, "; ".join(triggers)
+
+
 def _evaluate_search_candidates(lead: Lead, candidates: list[dict],
                                 provider_confidence: Optional[int] = None) -> list[dict]:
     evaluated = []
@@ -2142,6 +2224,22 @@ def _build_result(ctx: dict) -> dict:
         gmaps_location_match = scrape.get("location_match"),
         provider_confidence  = g_score,
     )
+    rejected_gmaps_url = ctx.get("perplexity_rejected_gmaps_url")
+    if (
+        maps_url
+        and rejected_gmaps_url
+        and maps_url.rstrip("/") == str(rejected_gmaps_url).rstrip("/")
+    ):
+        maps_eval = dict(maps_eval)
+        maps_eval["identity_score"] = 0
+        maps_eval["identity_verdict"] = "rejected"
+        maps_eval["identity_reason"] = "; ".join(
+            x for x in [
+                maps_eval.get("identity_reason"),
+                "perplexity_validation_rejected_gmaps_url",
+                ctx.get("perplexity_rejected_gmaps_reason"),
+            ] if x
+        )
     web_url = (web_best or {}).get("url")
     web_eval = (web_best or {}).get("evaluation") or score_candidate_url(
         source_company=lead.company, source_city=lead.city, source_state=lead.state,
